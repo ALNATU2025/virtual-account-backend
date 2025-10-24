@@ -1,0 +1,16 @@
+{
+    "name": "virtual-account-backend",
+    "version": "1.0.0",
+    "main": "server.js",
+    "type": "commonjs",
+    "scripts": {
+        "start": "node server.js"
+    },
+    "dependencies": {
+        "axios": "^1.7.2",
+        "cors": "^2.8.5",
+        "dotenv": "^16.3.1",
+        "express": "^4.19.2",
+        "mongoose": "^7.6.1"
+    }
+}
