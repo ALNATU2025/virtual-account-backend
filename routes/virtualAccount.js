@@ -289,3 +289,4 @@ router.post('/create-instant-account', async (req, res) => {
         });
     }
 });
+module.exports = router;
