@@ -24,11 +24,21 @@ const virtualAccountRoutes = require('./routes/virtualAccount');
 // Use routes
 app.use('/api/virtual-account', virtualAccountRoutes);
 
-// Default test route
+// --- 🩺 Health Check Endpoint ---
+app.get('/health', (req, res) => {
+    res.json({
+        success: true,
+        message: 'Virtual Account Backend is running',
+        timestamp: new Date().toISOString(),
+        environment: process.env.NODE_ENV || 'development'
+    });
+});
+
+// --- Default Root Route ---
 app.get('/', (req, res) => {
     res.send('🚀 Virtual Account Backend is running successfully');
 });
 
-// Start server
+// --- Start Server ---
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
