@@ -1,9 +1,9 @@
 const mongoose = require('mongoose');
 
 const virtualAccountSchema = new mongoose.Schema({
+    // ✅ CHANGE: Use String instead of ObjectId
     userId: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: 'User',
+        type: String,
         required: true,
         unique: true
     },
