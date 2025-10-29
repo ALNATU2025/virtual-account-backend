@@ -3,8 +3,13 @@ const router = express.Router();
 const VirtualAccount = require('../models/VirtualAccount');
 const axios = require('axios');
 
-// PayStack webhook secret (set this in your PayStack dashboard)
-const PAYSTACK_SECRET_KEY = 'sk_test_bda38e781c1781083e6ca116c48cc52609205da3';
+// ✅ SECURE: Use environment variables
+const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
+
+// Validate webhook secret key
+if (!PAYSTACK_SECRET_KEY) {
+    console.error('❌ PAYSTACK_SECRET_KEY is not defined in environment variables');
+}
 
 // ✅ PayStack webhook handler for virtual account transactions
 router.post('/paystack', async (req, res) => {
