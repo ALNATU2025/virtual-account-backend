@@ -22,6 +22,11 @@ const virtualAccountRoutes = require('./routes/virtualAccount');
 app.use('/api/virtual-accounts', virtualAccountRoutes);
 console.log('✅ Virtual account routes mounted at /api/virtual-accounts');
 
+// ✅ ADDED: Import webhook routes
+const webhookRoutes = require('./routes/webhooks');
+app.use('/api/webhooks', webhookRoutes);
+console.log('✅ Webhook routes mounted at /api/webhooks');
+
 // Health check
 app.get('/health', (req, res) => {
     res.json({
@@ -43,7 +48,8 @@ app.get('/', (req, res) => {
             'GET /health',
             'POST /api/virtual-accounts/create-instant-account',
             'GET /api/virtual-accounts/:userId',
-            'GET /api/virtual-accounts/health/status'
+            'GET /api/virtual-accounts/health/status',
+            'POST /api/webhooks/paystack' // ✅ ADDED webhook endpoint
         ]
     });
 });
