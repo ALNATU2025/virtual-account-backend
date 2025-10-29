@@ -1,292 +1,144 @@
 const express = require('express');
 const router = express.Router();
-const axios = require('axios');
 const VirtualAccount = require('../models/VirtualAccount');
+const axios = require('axios');
 
-// Use your Paystack secret key directly
+// PayStack webhook secret (set this in your PayStack dashboard)
 const PAYSTACK_SECRET_KEY = 'sk_test_bda38e781c1781083e6ca116c48cc52609205da3';
+const PAYSTACK_PUBLIC_KEY='pk_test_d8dc0b18067bf84069ff43244032e1811ec690ed';
 
-
-// Get virtual account by user ID (compatible with Flutter app)
-router.get('/:userId', async (req, res) => {
+// ✅ PayStack webhook handler for virtual account transactions
+router.post('/paystack', async (req, res) => {
     try {
-        const { userId } = req.params;
+        console.log('📩 PayStack webhook received:', req.body.event);
 
-        console.log(`🔍 Fetching virtual account for user: ${userId}`);
-
-        if (!userId) {
-            return res.status(400).json({
-                success: false,
-                message: 'User ID is required',
-            });
+        // Verify webhook signature (important for security)
+        const crypto = require('crypto');
+        const hash = crypto.createHmac('sha512', PAYSTACK_SECRET_KEY)
+            .update(JSON.stringify(req.body))
+            .digest('hex');
+        
+        if (hash !== req.headers['x-paystack-signature']) {
+            console.error('❌ Invalid webhook signature');
+            return res.status(401).json({ success: false, message: 'Invalid signature' });
         }
 
-        const virtualAccount = await VirtualAccount.findOne({ userId });
-
-        if (!virtualAccount) {
-            console.log(`❌ Virtual account not found for user: ${userId}`);
-            return res.status(404).json({
-                success: false,
-                message: 'Virtual account not found for this user',
-                hasAccount: false,
-            });
+        const event = req.body;
+        
+        // Handle different webhook events
+        switch (event.event) {
+            case 'charge.success':
+                await handleSuccessfulCharge(event.data);
+                break;
+                
+            case 'transfer.success':
+                await handleSuccessfulTransfer(event.data);
+                break;
+                
+            case 'dedicatedaccount.assign':
+                await handleVirtualAccountAssignment(event.data);
+                break;
+                
+            case 'dedicatedaccount.create':
+                await handleVirtualAccountCreation(event.data);
+                break;
+                
+            default:
+                console.log(`ℹ️ Unhandled webhook event: ${event.event}`);
         }
 
-        console.log(`✅ Virtual account found: ${virtualAccount.accountNumber}`);
-
-        res.json({
-            success: true,
-            accountNumber: virtualAccount.accountNumber,
-            accountName: virtualAccount.accountName,
-            bankName: virtualAccount.bankName,
-            active: virtualAccount.active,
-            assigned: virtualAccount.assigned,
-            customerCode: virtualAccount.customerCode,
-            hasAccount: true,
-        });
+        console.log('✅ Webhook processed successfully');
+        res.json({ success: true, message: 'Webhook processed' });
+        
     } catch (error) {
-        console.error('❌ Get virtual account error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to get virtual account',
-            error: process.env.NODE_ENV === 'development' ? error.message : undefined,
-        });
+        console.error('❌ Webhook processing error:', error);
+        res.status(500).json({ success: false, message: 'Webhook processing failed' });
     }
 });
 
-// Health check endpoint
-router.get('/health/status', async (req, res) => {
+// Handle successful charges (payments to virtual accounts)
+async function handleSuccessfulCharge(chargeData) {
     try {
-        res.json({
-            success: true,
-            message: 'Virtual account service is running',
-            timestamp: new Date().toISOString(),
+        console.log('💰 Processing successful charge:', chargeData.reference);
+        
+        // Find virtual account by account number
+        const virtualAccount = await VirtualAccount.findOne({ 
+            accountNumber: chargeData.authorization.channel 
         });
-    } catch (error) {
-        console.error('Health check error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Service health check failed',
-        });
-    }
-});
-
-// Enhanced create endpoint with better error handling
-router.post('/create-instant-account', async (req, res) => {
-    try {
-        const { userId, email, firstName, lastName, phone, preferredBank = 'wema-bank' } = req.body;
-
-        console.log(`🚀 CREATE-INSTANT: Creating virtual account for user: ${userId}`);
-
-        // Validate required fields
-        if (!userId || !email || !firstName || !lastName || !phone) {
-            return res.status(400).json({
-                success: false,
-                message: 'Missing required fields: userId, email, firstName, lastName, phone',
-            });
-        }
-
-        // Check if virtual account already exists
-        const existingAccount = await VirtualAccount.findOne({ userId });
-        if (existingAccount) {
-            console.log(`✅ Virtual account already exists for user ${userId}: ${existingAccount.accountNumber}`);
-            return res.json({
-                success: true,
-                accountNumber: existingAccount.accountNumber,
-                accountName: existingAccount.accountName,
-                bankName: existingAccount.bankName,
-                active: existingAccount.active,
-                customerCode: existingAccount.customerCode,
-                message: 'Virtual account already exists',
-            });
-        }
-
-        // Create or get customer
-        let customerCode;
-        try {
-            // Try to find existing customer first
-            const customerResponse = await axios.get(
-                `https://api.paystack.co/customer?email=${encodeURIComponent(email)}`,
-                {
-                    headers: {
-                        Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-                    },
-                    timeout: 10000,
-                }
-            );
-
-            if (customerResponse.data.data && customerResponse.data.data.length > 0) {
-                customerCode = customerResponse.data.data[0].customer_code;
-                console.log(`✅ Found existing customer: ${customerCode}`);
-            } else {
-                // Create new customer
-                const createCustomerResponse = await axios.post(
-                    'https://api.paystack.co/customer',
-                    {
-                        email: email,
-                        first_name: firstName,
-                        last_name: lastName,
-                        phone: phone,
-                    },
-                    {
-                        headers: {
-                            Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-                            'Content-Type': 'application/json',
-                        },
-                        timeout: 10000,
-                    }
-                );
-
-                if (createCustomerResponse.data.status && createCustomerResponse.data.data) {
-                    customerCode = createCustomerResponse.data.data.customer_code;
-                    console.log(`✅ Created new customer: ${customerCode}`);
-                } else {
-                    throw new Error('Failed to create customer');
-                }
-            }
-        } catch (error) {
-            console.error('Customer creation error:', error.response?.data || error.message);
-
-            // Handle customer already exists case
-            if (error.response?.status === 400 && error.response?.data?.message?.includes('already exists')) {
-                try {
-                    const retryResponse = await axios.get(
-                        `https://api.paystack.co/customer?email=${encodeURIComponent(email)}`,
-                        {
-                            headers: {
-                                Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-                            },
-                            timeout: 10000,
-                        }
-                    );
-
-                    if (retryResponse.data.data && retryResponse.data.data.length > 0) {
-                        customerCode = retryResponse.data.data[0].customer_code;
-                        console.log(`✅ Retrieved customer after conflict: ${customerCode}`);
-                    } else {
-                        throw new Error('Customer exists but not found');
-                    }
-                } catch (retryError) {
-                    return res.status(500).json({
-                        success: false,
-                        message: 'Failed to resolve customer',
-                    });
-                }
-            } else {
-                return res.status(500).json({
-                    success: false,
-                    message: 'Failed to create or retrieve customer',
-                });
-            }
-        }
-
-        // Create virtual account
-        try {
-            const paystackResponse = await axios.post(
-                'https://api.paystack.co/dedicated_account',
-                {
-                    customer: customerCode,
-                    preferred_bank: preferredBank,
-                },
-                {
-                    headers: {
-                        Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-                        'Content-Type': 'application/json',
-                    },
-                    timeout: 15000,
-                }
-            );
-
-            if (paystackResponse.data.status && paystackResponse.data.data) {
-                const virtualAccount = paystackResponse.data.data;
-
-                // Save to database
-                await VirtualAccount.create({
-                    userId,
-                    accountNumber: virtualAccount.account_number,
-                    accountName: virtualAccount.account_name,
-                    bankName: virtualAccount.bank.name,
-                    bankCode: virtualAccount.bank.id,
-                    customerCode: customerCode,
-                    assigned: true,
-                    active: true,
-                    paystackReference: virtualAccount.reference,
-                });
-
-                console.log(`✅ Virtual account created successfully: ${virtualAccount.account_number}`);
-
-                return res.json({
-                    success: true,
-                    accountNumber: virtualAccount.account_number,
-                    accountName: virtualAccount.account_name,
-                    bankName: virtualAccount.bank.name,
-                    active: true,
-                    customerCode: customerCode,
-                    message: 'Virtual account created successfully',
-                });
-            } else {
-                throw new Error(paystackResponse.data.message || 'Paystack API error');
-            }
-        } catch (paystackError) {
-            console.error('Paystack virtual account error:', paystackError.response?.data || paystackError.message);
-
-            // Handle case where customer already has virtual account
-            if (paystackError.response?.data?.message?.includes('already been assigned')) {
-                console.log(`ℹ️ Customer already has virtual account, retrieving...`);
-
-                try {
-                    const accountsResponse = await axios.get(
-                        `https://api.paystack.co/dedicated_account?customer=${customerCode}`,
-                        {
-                            headers: {
-                                Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-                            },
-                            timeout: 10000,
-                        }
-                    );
-
-                    if (accountsResponse.data.data && accountsResponse.data.data.length > 0) {
-                        const existingAccount = accountsResponse.data.data[0];
-
-                        // Save to our database
-                        await VirtualAccount.create({
-                            userId,
-                            accountNumber: existingAccount.account_number,
-                            accountName: existingAccount.account_name,
-                            bankName: existingAccount.bank.name,
-                            bankCode: existingAccount.bank.id,
-                            customerCode: customerCode,
-                            assigned: true,
-                            active: existingAccount.active,
-                            paystackReference: existingAccount.reference,
-                        });
-
-                        return res.json({
-                            success: true,
-                            accountNumber: existingAccount.account_number,
-                            accountName: existingAccount.account_name,
-                            bankName: existingAccount.bank.name,
-                            active: existingAccount.active,
-                            customerCode: customerCode,
-                            message: 'Virtual account retrieved successfully',
-                        });
-                    }
-                } catch (getError) {
-                    console.error('Failed to get existing account:', getError.message);
-                }
-            }
-
-            return res.status(500).json({
-                success: false,
-                message: 'Failed to create virtual account',
-            });
+        
+        if (virtualAccount) {
+            console.log(`✅ Charge of ${chargeData.amount} for account ${virtualAccount.accountNumber}`);
+            
+            // Update account balance or trigger other actions
+            // You might want to create a transaction record here
+            
+        } else {
+            console.log('❌ Virtual account not found for charge');
         }
     } catch (error) {
-        console.error('Instant virtual account creation error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Virtual account service temporarily unavailable',
-        });
+        console.error('❌ Error processing charge:', error);
     }
+}
+
+// Handle virtual account assignment
+async function handleVirtualAccountAssignment(accountData) {
+    try {
+        console.log('🔗 Virtual account assigned:', accountData.account_number);
+        
+        // Update virtual account status in database
+        await VirtualAccount.findOneAndUpdate(
+            { accountNumber: accountData.account_number },
+            { 
+                assigned: true,
+                active: true,
+                customerCode: accountData.customer.customer_code
+            },
+            { new: true }
+        );
+        
+        console.log(`✅ Virtual account ${accountData.account_number} assignment recorded`);
+    } catch (error) {
+        console.error('❌ Error processing account assignment:', error);
+    }
+}
+
+// Handle virtual account creation
+async function handleVirtualAccountCreation(accountData) {
+    try {
+        console.log('🆕 Virtual account created:', accountData.account_number);
+        
+        // This might be redundant since we create via API, but good to have
+        const existingAccount = await VirtualAccount.findOne({ 
+            accountNumber: accountData.account_number 
+        });
+        
+        if (!existingAccount) {
+            console.log('ℹ️ New virtual account created via webhook');
+            // You could create a record here if needed
+        }
+        
+    } catch (error) {
+        console.error('❌ Error processing account creation:', error);
+    }
+}
+
+// Handle successful transfers
+async function handleSuccessfulTransfer(transferData) {
+    try {
+        console.log('💸 Transfer successful:', transferData.reference);
+        // Handle transfer success logic here
+    } catch (error) {
+        console.error('❌ Error processing transfer:', error);
+    }
+}
+
+// Test webhook endpoint
+router.get('/test', (req, res) => {
+    res.json({
+        success: true,
+        message: 'Webhook endpoint is working',
+        webhook_url: 'https://virtual-account-backend.onrender.com/api/webhooks/paystack'
+    });
 });
+
 module.exports = router;
