@@ -19,13 +19,14 @@ mongoose.connect(process.env.MONGODB_URI, {
 
 // Import and use routes
 const virtualAccountRoutes = require('./routes/virtualAccount');
-app.use('/api/virtual-accounts', virtualAccountRoutes);
-console.log('✅ Virtual account routes mounted at /api/virtual-accounts');
-
-// ✅ ADDED: Import webhook routes
 const webhookRoutes = require('./routes/webhooks');
+const paymentRoutes = require('./routes/payments'); // ✅ ADD THIS
+
+app.use('/api/virtual-accounts', virtualAccountRoutes);
 app.use('/api/webhooks', webhookRoutes);
-console.log('✅ Webhook routes mounted at /api/webhooks');
+app.use('/api/payments', paymentRoutes); // ✅ ADD THIS
+
+console.log('✅ All routes mounted successfully');
 
 // Health check
 app.get('/health', (req, res) => {
@@ -49,7 +50,10 @@ app.get('/', (req, res) => {
             'POST /api/virtual-accounts/create-instant-account',
             'GET /api/virtual-accounts/:userId',
             'GET /api/virtual-accounts/health/status',
-            'POST /api/webhooks/paystack' // ✅ ADDED webhook endpoint
+            'POST /api/webhooks/paystack',
+            'POST /api/payments/verify', // ✅ ADD THIS
+            'POST /api/payments/initialize', // ✅ ADD THIS
+            'POST /api/payments/sync-success' // ✅ ADD THIS
         ]
     });
 });
