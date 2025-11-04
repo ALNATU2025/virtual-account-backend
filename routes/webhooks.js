@@ -1,10 +1,12 @@
 const express = require('express');
 const router = express.Router();
 const VirtualAccount = require('../models/VirtualAccount');
+const Transaction = require('../models/Transaction');
 const axios = require('axios');
 
 // ✅ SECURE: Use environment variables
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
+const MAIN_BACKEND_URL = process.env.MAIN_BACKEND_URL || 'https://vtpass-backend.onrender.com';
 
 // Validate webhook secret key
 if (!PAYSTACK_SECRET_KEY) {
@@ -60,27 +62,98 @@ router.post('/paystack', async (req, res) => {
     }
 });
 
-// Handle successful charges (payments to virtual accounts)
+// ✅ ENHANCED: Handle successful charges and update main backend wallet
 async function handleSuccessfulCharge(chargeData) {
     try {
         console.log('💰 Processing successful charge:', chargeData.reference);
         
-        // Find virtual account by account number
-        const virtualAccount = await VirtualAccount.findOne({ 
-            accountNumber: chargeData.authorization.channel 
+        const amountInNaira = chargeData.amount / 100;
+        const userId = chargeData.metadata?.userId || chargeData.customer?.metadata?.userId;
+        
+        console.log('💳 Charge details:', {
+            reference: chargeData.reference,
+            amount: amountInNaira,
+            userId: userId,
+            customerEmail: chargeData.customer?.email
+        });
+
+        // Check if transaction already exists
+        const existingTransaction = await Transaction.findOne({ 
+            reference: chargeData.reference 
         });
         
-        if (virtualAccount) {
-            console.log(`✅ Charge of ${chargeData.amount} for account ${virtualAccount.accountNumber}`);
-            
-            // Update account balance or trigger other actions
-            // You might want to create a transaction record here
-            
-        } else {
-            console.log('❌ Virtual account not found for charge');
+        if (existingTransaction) {
+            console.log('ℹ️ Transaction already processed:', chargeData.reference);
+            return;
         }
+
+        // Create transaction record
+        const transaction = new Transaction({
+            userId: userId || 'unknown',
+            type: 'wallet_funding',
+            amount: amountInNaira,
+            reference: chargeData.reference,
+            status: 'success',
+            gateway: 'paystack',
+            gatewayResponse: chargeData,
+            description: `Wallet funding via PayStack - ${chargeData.authorization?.channel || 'virtual_account'}`
+        });
+
+        await transaction.save();
+        console.log('✅ Transaction recorded:', chargeData.reference);
+
+        // ✅ CRITICAL: Update wallet balance in main backend
+        if (userId && userId !== 'unknown') {
+            await updateMainBackendWallet(userId, amountInNaira, chargeData.reference);
+        } else {
+            console.log('⚠️ No user ID found in charge data, cannot update main backend');
+        }
+
     } catch (error) {
         console.error('❌ Error processing charge:', error);
+    }
+}
+
+// ✅ NEW: Update main backend wallet balance
+async function updateMainBackendWallet(userId, amount, reference) {
+    try {
+        console.log(`🔄 Updating main backend wallet for user ${userId}: ₦${amount}`);
+        
+        const updateData = {
+            userId: userId,
+            amount: amount,
+            reference: reference,
+            type: 'credit',
+            description: `Wallet funding via PayStack - Ref: ${reference}`
+        };
+
+        // Call main backend to update wallet balance
+        const response = await axios.post(
+            `${MAIN_BACKEND_URL}/api/wallet/top-up`,
+            updateData,
+            {
+                headers: {
+                    'Content-Type': 'application/json',
+                    // Add any required authentication headers here
+                },
+                timeout: 10000
+            }
+        );
+
+        if (response.data.success) {
+            console.log('✅ Main backend wallet updated successfully');
+        } else {
+            console.error('❌ Main backend wallet update failed:', response.data.message);
+        }
+
+    } catch (error) {
+        console.error('💥 Failed to update main backend wallet:', {
+            message: error.message,
+            response: error.response?.data,
+            status: error.response?.status
+        });
+        
+        // You might want to implement retry logic here
     }
 }
 
@@ -111,7 +184,6 @@ async function handleVirtualAccountCreation(accountData) {
     try {
         console.log('🆕 Virtual account created:', accountData.account_number);
         
-        // This might be redundant since we create via API, but good to have
         const existingAccount = await VirtualAccount.findOne({ 
             accountNumber: accountData.account_number 
         });
@@ -141,7 +213,8 @@ router.get('/test', (req, res) => {
     res.json({
         success: true,
         message: 'Webhook endpoint is working',
-        webhook_url: 'https://virtual-account-backend.onrender.com/api/webhooks/paystack'
+        webhook_url: 'https://virtual-account-backend.onrender.com/api/webhooks/paystack',
+        main_backend_url: MAIN_BACKEND_URL
     });
 });
 
