@@ -1,4 +1,6 @@
-// TEMPORARY FIX: Update your VirtualAccount model
+// models/VirtualAccount.js - COMPLETE FIXED VERSION
+const mongoose = require('mongoose'); // ✅ ADD THIS MISSING LINE
+
 const virtualAccountSchema = new mongoose.Schema({
     userId: {
         type: String,
@@ -36,8 +38,10 @@ const virtualAccountSchema = new mongoose.Schema({
     },
     paystackReference: {
         type: String,
-        required: false // ✅ TEMPORARY: Change to false
+        required: false // ✅ TEMPORARY: Set to false to fix existing users
     }
 }, {
     timestamps: true
 });
+
+module.exports = mongoose.model('VirtualAccount', virtualAccountSchema);
