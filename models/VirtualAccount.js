@@ -1,7 +1,5 @@
-const mongoose = require('mongoose');
-
+// TEMPORARY FIX: Update your VirtualAccount model
 const virtualAccountSchema = new mongoose.Schema({
-    // ✅ CHANGE: Use String instead of ObjectId
     userId: {
         type: String,
         required: true,
@@ -38,10 +36,8 @@ const virtualAccountSchema = new mongoose.Schema({
     },
     paystackReference: {
         type: String,
-        required: true
+        required: false // ✅ TEMPORARY: Change to false
     }
 }, {
     timestamps: true
 });
-
-module.exports = mongoose.model('VirtualAccount', virtualAccountSchema);
