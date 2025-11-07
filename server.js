@@ -2,6 +2,7 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+
 require('dotenv').config();
 
 const app = express();
@@ -24,10 +25,14 @@ const webhookRoutes = require('./routes/webhooks');
 const paymentRoutes = require('./routes/payments');
 const walletRoutes = require('./routes/wallet');
 
+
 app.use('/api/virtual-accounts', virtualAccountRoutes);
 app.use('/api/webhooks', webhookRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/wallet', walletRoutes);
+
+
+
 
 console.log('✅ All routes mounted successfully');
 
@@ -70,4 +75,5 @@ app.listen(PORT, () => {
     console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
     console.log(`🔗 Available at: https://virtual-account-backend.onrender.com`);
 });
+
 
