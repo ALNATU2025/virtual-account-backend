@@ -62,8 +62,8 @@ router.get('/verify', async (req, res) => {
             if (existingTransaction) {
                 console.log('⚠️ Transaction already processed:', paymentReference);
                 
-                // Still try to sync with main backend
-                await _syncWithMainBackend(userId, amount, paymentReference);
+                // ✅ FIXED: Still sync with main backend even if transaction exists
+                const syncResult = await _syncWithMainBackend(userId, amount, paymentReference);
                 
                 return res.json({
                     success: true,
@@ -71,7 +71,8 @@ router.get('/verify', async (req, res) => {
                     amount: amount,
                     transactionId: existingTransaction._id,
                     reference: paymentReference,
-                    userId: userId
+                    userId: userId,
+                    newBalance: syncResult.newBalance // ✅ Return new balance
                 });
             }
 
@@ -95,7 +96,7 @@ router.get('/verify', async (req, res) => {
                 reference: paymentReference
             });
 
-            // Sync with main backend to update wallet balance
+            // ✅ ENHANCED: Sync with main backend to update wallet balance
             const syncResult = await _syncWithMainBackend(userId, amount, paymentReference);
 
             res.json({
@@ -105,7 +106,7 @@ router.get('/verify', async (req, res) => {
                 transactionId: transaction._id,
                 reference: paymentReference,
                 userId: userId,
-                newBalance: syncResult.newBalance,
+                newBalance: syncResult.newBalance, // ✅ Return new balance
                 paystackData: paystackData.data
             });
 
@@ -191,15 +192,16 @@ router.post('/verify', async (req, res) => {
             if (existingTransaction) {
                 console.log('⚠️ Transaction already processed:', reference);
                 
-                // Sync with main backend
-                await _syncWithMainBackend(userId, amount, reference);
+                // ✅ FIXED: Sync with main backend even if transaction exists
+                const syncResult = await _syncWithMainBackend(userId, amount, reference);
                 
                 return res.json({
                     success: true,
                     message: 'Payment already verified',
                     amount: amount,
                     transactionId: existingTransaction._id,
-                    reference: reference
+                    reference: reference,
+                    newBalance: syncResult.newBalance // ✅ Return new balance
                 });
             }
 
@@ -223,7 +225,7 @@ router.post('/verify', async (req, res) => {
                 reference: reference
             });
 
-            // Sync with main backend to update wallet balance
+            // ✅ ENHANCED: Sync with main backend to update wallet balance
             const syncResult = await _syncWithMainBackend(userId, amount, reference);
 
             res.json({
@@ -232,7 +234,7 @@ router.post('/verify', async (req, res) => {
                 amount: amount,
                 transactionId: transaction._id,
                 reference: reference,
-                newBalance: syncResult.newBalance,
+                newBalance: syncResult.newBalance, // ✅ Return new balance
                 paystackData: paystackData.data
             });
 
@@ -271,7 +273,7 @@ router.post('/verify', async (req, res) => {
     }
 });
 
-// ✅ Sync with main backend function
+// ✅ ENHANCED: Sync with main backend function
 async function _syncWithMainBackend(userId, amount, reference) {
     try {
         console.log(`🔄 Syncing payment with main backend: ${reference} for user: ${userId}`);
@@ -309,7 +311,8 @@ async function _syncWithMainBackend(userId, amount, reference) {
         // The sync can be retried later
         return {
             success: false,
-            error: error.response?.data?.message || error.message
+            error: error.response?.data?.message || error.message,
+            newBalance: 0 // Return 0 as fallback
         };
     }
 }
