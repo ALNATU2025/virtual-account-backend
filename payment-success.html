@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Payment Successful - VTPass</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .success-container {
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            text-align: center;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            max-width: 500px;
+            width: 100%;
+            animation: fadeInUp 0.6s ease-out;
+        }
+
+        .success-icon {
+            width: 80px;
+            height: 80px;
+            background: #4CAF50;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 20px;
+            animation: bounce 1s ease-in-out;
+        }
+
+        .success-icon svg {
+            width: 40px;
+            height: 40px;
+            fill: white;
+        }
+
+        h1 {
+            color: #2d3748;
+            margin-bottom: 10px;
+            font-size: 28px;
+            font-weight: 700;
+        }
+
+        .message {
+            color: #718096;
+            font-size: 16px;
+            line-height: 1.6;
+            margin-bottom: 30px;
+        }
+
+        .transaction-details {
+            background: #f7fafc;
+            border-radius: 12px;
+            padding: 20px;
+            margin: 25px 0;
+            text-align: left;
+        }
+
+        .detail-item {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 10px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #e2e8f0;
+        }
+
+        .detail-item:last-child {
+            margin-bottom: 0;
+            padding-bottom: 0;
+            border-bottom: none;
+        }
+
+        .detail-label {
+            color: #718096;
+            font-weight: 500;
+        }
+
+        .detail-value {
+            color: #2d3748;
+            font-weight: 600;
+        }
+
+        .amount {
+            font-size: 32px;
+            font-weight: 700;
+            color: #4CAF50;
+            margin: 20px 0;
+        }
+
+        .redirect-message {
+            color: #718096;
+            font-size: 14px;
+            margin: 20px 0;
+            padding: 10px;
+            background: #f0fff4;
+            border-radius: 8px;
+            border-left: 4px solid #4CAF50;
+        }
+
+        .home-button {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 50px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            display: inline-block;
+            margin-top: 10px;
+        }
+
+        .home-button:hover {
+            background: #45a049;
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(76, 175, 80, 0.3);
+        }
+
+        .loading-spinner {
+            display: none;
+            width: 20px;
+            height: 20px;
+            border: 2px solid #ffffff;
+            border-top: 2px solid transparent;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 10px;
+        }
+
+        @keyframes fadeInUp {
+            from {
+                opacity: 0;
+                transform: translateY(30px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        @keyframes bounce {
+            0%, 20%, 50%, 80%, 100% {
+                transform: translateY(0);
+            }
+            40% {
+                transform: translateY(-10px);
+            }
+            60% {
+                transform: translateY(-5px);
+            }
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        @media (max-width: 480px) {
+            .success-container {
+                padding: 30px 20px;
+                margin: 10px;
+            }
+
+            h1 {
+                font-size: 24px;
+            }
+
+            .amount {
+                font-size: 28px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="success-container">
+        <div class="success-icon">
+            <svg viewBox="0 0 24 24">
+                <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+            </svg>
+        </div>
+        
+        <h1>Payment Successful! 🎉</h1>
+        
+        <div class="message">
+            Your payment has been processed successfully. Your wallet has been credited.
+        </div>
+
+        <div class="amount" id="amountDisplay">₦0.00</div>
+
+        <div class="transaction-details">
+            <div class="detail-item">
+                <span class="detail-label">Transaction ID:</span>
+                <span class="detail-value" id="transactionId">-</span>
+            </div>
+            <div class="detail-item">
+                <span class="detail-label">Reference:</span>
+                <span class="detail-value" id="reference">-</span>
+            </div>
+            <div class="detail-item">
+                <span class="detail-label">Date & Time:</span>
+                <span class="detail-value" id="timestamp">-</span>
+            </div>
+            <div class="detail-item">
+                <span class="detail-label">New Balance:</span>
+                <span class="detail-value" id="newBalance">₦0.00</span>
+            </div>
+        </div>
+
+        <div class="redirect-message" id="redirectMessage">
+            Redirecting you back to the app in <span id="countdown">5</span> seconds...
+        </div>
+
+        <button class="home-button" onclick="redirectToApp()">
+            <span class="loading-spinner" id="buttonSpinner"></span>
+            Return to App Now
+        </button>
+    </div>
+
+    <script>
+        // Get URL parameters
+        const urlParams = new URLSearchParams(window.location.search);
+        const reference = urlParams.get('reference') || urlParams.get('trxref');
+        
+        // DOM elements
+        const amountDisplay = document.getElementById('amountDisplay');
+        const transactionId = document.getElementById('transactionId');
+        const referenceDisplay = document.getElementById('reference');
+        const timestamp = document.getElementById('timestamp');
+        const newBalance = document.getElementById('newBalance');
+        const countdown = document.getElementById('countdown');
+        const redirectMessage = document.getElementById('redirectMessage');
+        const buttonSpinner = document.getElementById('buttonSpinner');
+
+        // Verify payment and get details
+        async function verifyPayment() {
+            try {
+                console.log('Verifying payment with reference:', reference);
+                
+                const response = await fetch(`/api/payments/verify?reference=${reference}`, {
+                    method: 'GET',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                });
+
+                const data = await response.json();
+                console.log('Verification response:', data);
+
+                if (data.success) {
+                    // Update UI with payment details
+                    amountDisplay.textContent = `₦${data.amount?.toLocaleString() || '0.00'}`;
+                    transactionId.textContent = data.transactionId || 'N/A';
+                    referenceDisplay.textContent = reference;
+                    timestamp.textContent = new Date().toLocaleString();
+                    newBalance.textContent = `₦${data.newBalance?.toLocaleString() || '0.00'}`;
+                    
+                    // Start countdown for automatic redirect
+                    startCountdown();
+                } else {
+                    showError(data.message || 'Payment verification failed');
+                }
+            } catch (error) {
+                console.error('Verification error:', error);
+                showError('Failed to verify payment. Please check your transaction history.');
+                
+                // Still show basic info and allow redirect
+                referenceDisplay.textContent = reference;
+                timestamp.textContent = new Date().toLocaleString();
+                startCountdown();
+            }
+        }
+
+        // Countdown for automatic redirect
+        function startCountdown() {
+            let seconds = 5;
+            countdown.textContent = seconds;
+
+            const countdownInterval = setInterval(() => {
+                seconds--;
+                countdown.textContent = seconds;
+
+                if (seconds <= 0) {
+                    clearInterval(countdownInterval);
+                    redirectToApp();
+                }
+            }, 1000);
+        }
+
+        // Manual redirect function
+        function redirectToApp() {
+            // Show loading spinner
+            buttonSpinner.style.display = 'inline-block';
+            
+            // Redirect to your Flutter app using deep link
+            const appDeepLink = 'yourapp://payment-success';
+            const webFallback = 'https://yourapp.com'; // Your app's website
+            
+            // Try to open the app
+            window.location.href = appDeepLink;
+            
+            // Fallback: If app is not installed, redirect to website
+            setTimeout(() => {
+                window.location.href = webFallback;
+            }, 500);
+        }
+
+        // Error handling
+        function showError(message) {
+            redirectMessage.innerHTML = `
+                <div style="color: #e53e3e; background: #fed7d7; padding: 10px; border-radius: 8px; border-left: 4px solid #e53e3e;">
+                    ${message}. You can safely return to the app.
+                </div>
+            `;
+        }
+
+        // Initialize when page loads
+        document.addEventListener('DOMContentLoaded', function() {
+            if (reference) {
+                verifyPayment();
+            } else {
+                showError('No payment reference found.');
+                startCountdown();
+            }
+        });
+
+        // Handle visibility change - if user comes back to this tab, redirect immediately
+        document.addEventListener('visibilitychange', function() {
+            if (!document.hidden) {
+                // Page is visible again, redirect immediately
+                redirectToApp();
+            }
+        });
+    </script>
+</body>
+</html>
