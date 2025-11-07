@@ -14,10 +14,6 @@ if (!PAYSTACK_SECRET_KEY) {
     console.error('❌ PAYSTACK_SECRET_KEY is not defined in environment variables');
 }
 
-// ✅ ADDED: Serve payment success page
-router.get('/success', (req, res) => {
-    res.sendFile(path.join(__dirname, '../../public/payment-success.html'));
-});
 
 // ✅ ENHANCED GET endpoint for payment verification
 router.get('/verify', async (req, res) => {
