@@ -573,4 +573,14 @@ router.get('/transaction/:reference', async (req, res) => {
     }
 });
 
+router.get('/success', (req, res) => {
+  const filePath = path.join(__dirname, '../public/payment-success.html');
+  res.sendFile(filePath, err => {
+    if (err) {
+      console.error('Error sending success page:', err);
+      res.status(404).send('Success page not found');
+    }
+  });
+});
+
 module.exports = router;
