@@ -6,18 +6,150 @@ const VirtualAccount = require('../models/VirtualAccount');
 
 // ✅ SECURE: Use environment variables
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
+const MAIN_BACKEND_URL = process.env.MAIN_BACKEND_URL || 'https://vtpass-backend.onrender.com';
 
 // Validate that keys are loaded
 if (!PAYSTACK_SECRET_KEY) {
     console.error('❌ PAYSTACK_SECRET_KEY is not defined in environment variables');
 }
 
-// ✅ PayStack payment verification endpoint
+// ✅ ADDED: GET endpoint for payment verification (for browser redirects)
+router.get('/verify', async (req, res) => {
+    try {
+        const { reference, trxref } = req.query;
+        const paymentReference = reference || trxref;
+
+        console.log(`🔍 GET Verifying PayStack payment: ${paymentReference}`);
+
+        if (!paymentReference) {
+            return res.status(400).json({
+                success: false,
+                message: 'Payment reference is required'
+            });
+        }
+
+        // Verify with PayStack API
+        const verifyResponse = await axios.get(
+            `https://api.paystack.co/transaction/verify/${paymentReference}`,
+            {
+                headers: {
+                    'Authorization': `Bearer ${PAYSTACK_SECRET_KEY}`,
+                    'Content-Type': 'application/json'
+                },
+                timeout: 15000
+            }
+        );
+
+        const paystackData = verifyResponse.data;
+
+        console.log('📦 GET PayStack verification response:', {
+            status: paystackData.status,
+            reference: paystackData.data?.reference,
+            amount: paystackData.data?.amount,
+            gateway_response: paystackData.data?.gateway_response
+        });
+
+        if (paystackData.status === true && paystackData.data.status === 'success') {
+            const amount = paystackData.data.amount / 100; // Convert from kobo to naira
+            const userId = paystackData.data.metadata?.userId || paystackData.data.customer?.email;
+
+            // Check if transaction already exists
+            const existingTransaction = await Transaction.findOne({
+                reference: paymentReference,
+                status: 'success'
+            });
+
+            if (existingTransaction) {
+                console.log('⚠️ Transaction already processed:', paymentReference);
+                
+                // Still try to sync with main backend
+                await _syncWithMainBackend(userId, amount, paymentReference);
+                
+                return res.json({
+                    success: true,
+                    message: 'Payment already verified',
+                    amount: amount,
+                    transactionId: existingTransaction._id,
+                    reference: paymentReference,
+                    userId: userId
+                });
+            }
+
+            // Create new transaction record
+            const transaction = new Transaction({
+                userId: userId,
+                type: 'wallet_funding',
+                amount: amount,
+                reference: paymentReference,
+                status: 'success',
+                gateway: 'paystack',
+                gatewayResponse: paystackData.data,
+                description: 'Wallet funding via PayStack'
+            });
+
+            await transaction.save();
+
+            console.log('✅ GET Payment verified and transaction recorded:', {
+                userId: userId,
+                amount: amount,
+                reference: paymentReference
+            });
+
+            // Sync with main backend to update wallet balance
+            const syncResult = await _syncWithMainBackend(userId, amount, paymentReference);
+
+            res.json({
+                success: true,
+                message: 'Payment verified successfully',
+                amount: amount,
+                transactionId: transaction._id,
+                reference: paymentReference,
+                userId: userId,
+                newBalance: syncResult.newBalance,
+                paystackData: paystackData.data
+            });
+
+        } else {
+            console.log('❌ GET PayStack verification failed:', paystackData.data?.gateway_response);
+            
+            res.status(400).json({
+                success: false,
+                message: paystackData.data?.gateway_response || 'Payment verification failed',
+                gatewayResponse: paystackData.data
+            });
+        }
+
+    } catch (error) {
+        console.error('💥 GET PayStack verification error:', error.response?.data || error.message);
+
+        // Handle specific PayStack errors
+        if (error.response?.status === 404) {
+            return res.status(404).json({
+                success: false,
+                message: 'Transaction not found. Please check the reference code.'
+            });
+        }
+
+        if (error.response?.status === 401) {
+            return res.status(500).json({
+                success: false,
+                message: 'Payment gateway configuration error'
+            });
+        }
+
+        res.status(500).json({
+            success: false,
+            message: 'Payment verification service temporarily unavailable'
+        });
+    }
+});
+
+// ✅ PayStack payment verification endpoint (POST - existing)
 router.post('/verify', async (req, res) => {
     try {
         const { reference, userId } = req.body;
 
-        console.log(`🔍 Verifying PayStack payment: ${reference} for user: ${userId}`);
+        console.log(`🔍 POST Verifying PayStack payment: ${reference} for user: ${userId}`);
 
         if (!reference) {
             return res.status(400).json({
@@ -40,7 +172,7 @@ router.post('/verify', async (req, res) => {
 
         const paystackData = verifyResponse.data;
 
-        console.log('📦 PayStack verification response:', {
+        console.log('📦 POST PayStack verification response:', {
             status: paystackData.status,
             reference: paystackData.data?.reference,
             amount: paystackData.data?.amount,
@@ -58,6 +190,10 @@ router.post('/verify', async (req, res) => {
 
             if (existingTransaction) {
                 console.log('⚠️ Transaction already processed:', reference);
+                
+                // Sync with main backend
+                await _syncWithMainBackend(userId, amount, reference);
+                
                 return res.json({
                     success: true,
                     message: 'Payment already verified',
@@ -81,14 +217,14 @@ router.post('/verify', async (req, res) => {
 
             await transaction.save();
 
-            console.log('✅ Payment verified and transaction recorded:', {
+            console.log('✅ POST Payment verified and transaction recorded:', {
                 userId: userId,
                 amount: amount,
                 reference: reference
             });
 
-            // Note: Wallet balance update happens in the main backend (vtpass-backend)
-            // This service only records the transaction
+            // Sync with main backend to update wallet balance
+            const syncResult = await _syncWithMainBackend(userId, amount, reference);
 
             res.json({
                 success: true,
@@ -96,11 +232,12 @@ router.post('/verify', async (req, res) => {
                 amount: amount,
                 transactionId: transaction._id,
                 reference: reference,
+                newBalance: syncResult.newBalance,
                 paystackData: paystackData.data
             });
 
         } else {
-            console.log('❌ PayStack verification failed:', paystackData.data?.gateway_response);
+            console.log('❌ POST PayStack verification failed:', paystackData.data?.gateway_response);
             
             res.status(400).json({
                 success: false,
@@ -110,7 +247,7 @@ router.post('/verify', async (req, res) => {
         }
 
     } catch (error) {
-        console.error('💥 PayStack verification error:', error.response?.data || error.message);
+        console.error('💥 POST PayStack verification error:', error.response?.data || error.message);
 
         // Handle specific PayStack errors
         if (error.response?.status === 404) {
@@ -130,6 +267,137 @@ router.post('/verify', async (req, res) => {
         res.status(500).json({
             success: false,
             message: 'Payment verification service temporarily unavailable'
+        });
+    }
+});
+
+// ✅ Sync with main backend function
+async function _syncWithMainBackend(userId, amount, reference) {
+    try {
+        console.log(`🔄 Syncing payment with main backend: ${reference} for user: ${userId}`);
+        
+        const syncResponse = await axios.post(
+            `${MAIN_BACKEND_URL}/api/wallet/top-up`,
+            {
+                userId: userId,
+                amount: amount,
+                reference: reference,
+                source: 'paystack_funding',
+                description: 'Wallet funding via PayStack'
+            },
+            {
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                timeout: 10000
+            }
+        );
+
+        if (syncResponse.data.success) {
+            console.log('✅ Main backend sync successful');
+            return {
+                success: true,
+                newBalance: syncResponse.data.newBalance
+            };
+        } else {
+            throw new Error(syncResponse.data.message || 'Main backend sync failed');
+        }
+    } catch (error) {
+        console.error('❌ Main backend sync failed:', error.response?.data || error.message);
+        
+        // Don't throw error - we still want to record the transaction
+        // The sync can be retried later
+        return {
+            success: false,
+            error: error.response?.data?.message || error.message
+        };
+    }
+}
+
+// ✅ ADDED: Wallet balance endpoint
+router.get('/wallet/balance/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+
+        console.log(`💰 Getting wallet balance for user: ${userId}`);
+
+        // Fetch balance from main backend
+        const balanceResponse = await axios.get(
+            `${MAIN_BACKEND_URL}/api/users/balance/${userId}`,
+            {
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                timeout: 10000
+            }
+        );
+
+        res.json({
+            success: true,
+            walletBalance: balanceResponse.data.walletBalance,
+            userId: userId,
+            lastUpdated: new Date().toISOString()
+        });
+
+    } catch (error) {
+        console.error('❌ Wallet balance fetch error:', error.response?.data || error.message);
+        
+        res.status(500).json({
+            success: false,
+            message: 'Failed to fetch wallet balance',
+            error: error.response?.data?.message || error.message
+        });
+    }
+});
+
+// ✅ ADDED: Wallet top-up endpoint
+router.post('/wallet/top-up', async (req, res) => {
+    try {
+        const { userId, amount, reference, source, description } = req.body;
+
+        console.log(`💰 Topping up wallet: ₦${amount} for user: ${userId}`);
+
+        if (!userId || !amount || !reference) {
+            return res.status(400).json({
+                success: false,
+                message: 'userId, amount, and reference are required'
+            });
+        }
+
+        // Update balance in main backend
+        const walletUpdateResponse = await axios.post(
+            `${MAIN_BACKEND_URL}/api/wallet/top-up`,
+            {
+                userId: userId,
+                amount: amount,
+                reference: reference,
+                source: source || 'paystack_funding',
+                description: description || 'Wallet funding'
+            },
+            {
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                timeout: 10000
+            }
+        );
+
+        res.json({
+            success: true,
+            message: 'Wallet topped up successfully',
+            amount: amount,
+            newBalance: walletUpdateResponse.data.newBalance,
+            transactionId: walletUpdateResponse.data.transactionId,
+            reference: reference
+        });
+
+    } catch (error) {
+        console.error('❌ Wallet top-up error:', error.response?.data || error.message);
+        
+        res.status(500).json({
+            success: false,
+            message: 'Wallet top-up failed',
+            error: error.response?.data?.message || error.message
         });
     }
 });
@@ -227,7 +495,7 @@ router.post('/initialize', async (req, res) => {
                 amount: amount * 100, // Convert to kobo
                 reference: reference,
                 currency: 'NGN',
-                callback_url: 'https://your-app.com/payment/verify',
+                callback_url: 'https://virtual-account-backend.onrender.com/api/payments/verify',
                 metadata: {
                     userId: userId,
                     custom_fields: [
