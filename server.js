@@ -1,3 +1,4 @@
+// server.js - UPDATED VERSION
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -20,11 +21,11 @@ mongoose.connect(process.env.MONGODB_URI, {
 // Import and use routes
 const virtualAccountRoutes = require('./routes/virtualAccount');
 const webhookRoutes = require('./routes/webhooks');
-const paymentRoutes = require('./routes/payments'); // ✅ ADD THIS
+const paymentRoutes = require('./routes/payments');
 
 app.use('/api/virtual-accounts', virtualAccountRoutes);
 app.use('/api/webhooks', webhookRoutes);
-app.use('/api/payments', paymentRoutes); // ✅ ADD THIS
+app.use('/api/payments', paymentRoutes);
 
 console.log('✅ All routes mounted successfully');
 
@@ -51,9 +52,12 @@ app.get('/', (req, res) => {
             'GET /api/virtual-accounts/:userId',
             'GET /api/virtual-accounts/health/status',
             'POST /api/webhooks/paystack',
-            'POST /api/payments/verify', // ✅ ADD THIS
-            'POST /api/payments/initialize', // ✅ ADD THIS
-            'POST /api/payments/sync-success' // ✅ ADD THIS
+            'POST /api/payments/verify',
+            'GET /api/payments/verify', // ✅ ADDED GET ENDPOINT
+            'POST /api/payments/initialize',
+            'POST /api/payments/sync-success',
+            'GET /api/wallet/balance/:userId', // ✅ ADDED
+            'POST /api/wallet/top-up' // ✅ ADDED
         ]
     });
 });
