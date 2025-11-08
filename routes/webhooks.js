@@ -6,10 +6,8 @@ const Transaction = require('../models/Transaction');
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
 const MAIN_BACKEND_URL = process.env.MAIN_BACKEND_URL || 'https://vtpass-backend.onrender.com';
 
-// 🧩 IMPORTANT: Use bodyParser.raw() for Paystack webhook route
 const bodyParser = require('body-parser');
 
-// ⚡ Raw body middleware must be used here, NOT express.json()
 router.post('/paystack', bodyParser.raw({ type: '*/*' }), async (req, res) => {
   try {
     const signature = req.headers['x-paystack-signature'];
@@ -19,61 +17,59 @@ router.post('/paystack', bodyParser.raw({ type: '*/*' }), async (req, res) => {
       .digest('hex');
 
     if (computedHash !== signature) {
-      console.log('📩 PayStack webhook received: undefined');
-      console.log('❌ Invalid webhook signature');
+      console.log('Invalid webhook signature');
       return res.status(401).json({ success: false, message: 'Invalid signature' });
     }
 
     const event = JSON.parse(req.body.toString());
-    console.log('📩 Valid PayStack webhook received:', event.event);
+    console.log('Valid PayStack webhook received:', event.event);
 
     if (event.event === 'charge.success') {
       await handleSuccessfulCharge(event.data);
     } else if (event.event === 'transfer.success') {
       await handleSuccessfulTransfer(event.data);
     } else {
-      console.log(`ℹ️ Unhandled webhook event: ${event.event}`);
+      console.log(`Unhandled webhook event: ${event.event}`);
     }
 
     res.json({ success: true, message: 'Webhook processed successfully' });
   } catch (error) {
-    console.error('❌ Webhook processing error:', error.message);
+    console.error('Webhook processing error:', error.message);
     res.status(500).json({ success: false, message: 'Webhook processing failed' });
   }
 });
 
-// ✅ Handle successful charges
 async function handleSuccessfulCharge(chargeData) {
   try {
-    console.log('💰 Processing successful charge:', chargeData.reference);
+    console.log('Processing successful charge:', chargeData.reference);
 
     const amountInNaira = chargeData.amount / 100;
     const userId = chargeData.metadata?.userId || chargeData.customer?.metadata?.userId;
 
     if (!userId) {
-      console.log('⚠️ No userId found, skipping wallet update');
+      console.log('No userId found, skipping wallet update');
       return;
     }
 
     const existing = await Transaction.findOne({ reference: chargeData.reference });
     if (existing) {
-      console.log('ℹ️ Transaction already exists:', chargeData.reference);
+      console.log('Transaction already exists:', chargeData.reference);
       return;
     }
 
     await Transaction.create({
       userId,
+      type: 'wallet_funding',
       amount: amountInNaira,
       reference: chargeData.reference,
       status: 'success',
-      type: 'wallet_funding',
       gateway: 'paystack',
+      gatewayResponse: chargeData,
       description: 'Wallet funded via Paystack webhook',
     });
 
-    console.log('✅ Transaction recorded:', chargeData.reference);
+    console.log('Transaction recorded:', chargeData.reference);
 
-    // ✅ Update wallet balance
     await axios.post(`${MAIN_BACKEND_URL}/api/wallet/top-up`, {
       userId,
       amount: amountInNaira,
@@ -83,15 +79,14 @@ async function handleSuccessfulCharge(chargeData) {
       source: 'paystack_webhook'
     });
 
-    console.log('✅ Wallet successfully updated for user:', userId);
+    console.log('Wallet successfully updated for user:', userId);
   } catch (error) {
-    console.error('💥 Error processing charge:', error.message);
+    console.error('Error processing charge:', error.message);
   }
 }
 
-// ✅ Handle transfer success
 async function handleSuccessfulTransfer(transferData) {
-  console.log('💸 Transfer successful:', transferData.reference);
+  console.log('Transfer successful:', transferData.reference);
 }
 
 router.get('/test', (req, res) => {
