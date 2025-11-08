@@ -5,27 +5,23 @@ const path = require('path');
 const Transaction = require('../models/Transaction');
 const VirtualAccount = require('../models/VirtualAccount');
 
-// ✅ Environment Variables
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
 const MAIN_BACKEND_URL = process.env.MAIN_BACKEND_URL || 'https://vtpass-backend.onrender.com';
 
-// Warn if not configured
 if (!PAYSTACK_SECRET_KEY) {
-  console.error('❌ PAYSTACK_SECRET_KEY missing in environment');
+  console.error('PAYSTACK_SECRET_KEY missing in environment');
 }
 
-// =============== VERIFY PAYSTACK PAYMENT (GET) ==================
 router.get('/verify', async (req, res) => {
   try {
     const { reference, trxref, redirect = 'true' } = req.query;
     const paymentReference = reference || trxref;
-    console.log(`🔍 Verifying Paystack Payment: ${paymentReference}`);
+    console.log(`Verifying Paystack Payment: ${paymentReference}`);
 
     if (!paymentReference) {
       return res.redirect('/api/payments/success');
     }
 
-    // ✅ Verify with Paystack
     const verifyResponse = await axios.get(
       `https://api.paystack.co/transaction/verify/${paymentReference}`,
       {
@@ -35,7 +31,7 @@ router.get('/verify', async (req, res) => {
     );
 
     const data = verifyResponse.data.data;
-    console.log('📦 Paystack verification response:', {
+    console.log('Paystack verification response:', {
       status: data.status,
       reference: data.reference,
       amount: data.amount,
@@ -43,17 +39,15 @@ router.get('/verify', async (req, res) => {
     });
 
     if (!data || data.status !== 'success') {
-      console.log('❌ Payment verification failed');
+      console.log('Payment verification failed');
       if (redirect === 'true')
         return res.redirect(`/api/payments/success?reference=${paymentReference}`);
       return res.status(400).json({ success: false, message: 'Payment not successful' });
     }
 
-    // ✅ Process verified payment
     const amount = data.amount / 100;
     const userId = data.metadata?.userId || data.customer?.email;
 
-    // Prevent duplicate transactions
     let transaction = await Transaction.findOne({ reference: paymentReference });
     if (!transaction) {
       transaction = await Transaction.create({
@@ -66,10 +60,9 @@ router.get('/verify', async (req, res) => {
         gatewayResponse: data,
         description: 'Wallet funding via Paystack',
       });
-      console.log('✅ Transaction recorded:', paymentReference);
+      console.log('Transaction recorded:', paymentReference);
     }
 
-    // ✅ Sync with main backend
     const syncResult = await syncWithMainBackend(userId, amount, paymentReference);
 
     if (redirect === 'true') {
@@ -85,7 +78,7 @@ router.get('/verify', async (req, res) => {
       transactionId: transaction._id,
     });
   } catch (error) {
-    console.error('💥 Verify payment error:', error.response?.data || error.message);
+    console.error('Verify payment error:', error.response?.data || error.message);
     const { reference, trxref } = req.query;
     const paymentReference = reference || trxref;
 
@@ -100,11 +93,10 @@ router.get('/verify', async (req, res) => {
   }
 });
 
-// =============== INITIALIZE PAYSTACK PAYMENT ==================
 router.post('/initialize', async (req, res) => {
   try {
     const { userId, email, amount, reference } = req.body;
-    console.log('💰 Initializing Paystack:', { userId, email, amount });
+    console.log('Initializing Paystack:', { userId, email, amount });
 
     if (!email || !amount || !reference) {
       return res.status(400).json({ success: false, message: 'Missing parameters' });
@@ -130,7 +122,7 @@ router.post('/initialize', async (req, res) => {
       reference: response.data.data.reference,
     });
   } catch (error) {
-    console.error('💥 Initialize error:', error.response?.data || error.message);
+    console.error('Initialize error:', error.response?.data || error.message);
     res.status(500).json({
       success: false,
       message: 'Payment initialization failed',
@@ -138,7 +130,6 @@ router.post('/initialize', async (req, res) => {
   }
 });
 
-// =============== SYNC WITH MAIN BACKEND ==================
 async function syncWithMainBackend(userId, amount, reference) {
   let retries = 0;
   const maxRetries = 3;
@@ -146,7 +137,7 @@ async function syncWithMainBackend(userId, amount, reference) {
 
   while (retries < maxRetries) {
     try {
-      console.log(`🔄 Syncing payment → Main Backend (Attempt ${retries + 1})`);
+      console.log(`Syncing payment → Main Backend (Attempt ${retries + 1})`);
 
       const syncResponse = await axios.post(
         url,
@@ -164,7 +155,7 @@ async function syncWithMainBackend(userId, amount, reference) {
       );
 
       if (syncResponse.data.success) {
-        console.log('✅ Main backend sync successful');
+        console.log('Main backend sync successful');
         return { success: true, newBalance: syncResponse.data.newBalance || 0 };
       } else {
         throw new Error(syncResponse.data.message || 'Main backend rejected sync');
@@ -173,13 +164,13 @@ async function syncWithMainBackend(userId, amount, reference) {
       const status = error.response?.status;
       if (status === 429) {
         retries++;
-        console.warn(`⚠️ Too Many Requests (429) — Retrying in ${retries * 2}s`);
+        console.warn(`Too Many Requests (429) — Retrying in ${retries * 2}s`);
         await new Promise((r) => setTimeout(r, retries * 2000));
       } else if (status === 404) {
-        console.error('❌ Main backend endpoint not found:', url);
+        console.error('Main backend endpoint not found:', url);
         break;
       } else {
-        console.error('❌ Sync failed:', error.response?.data || error.message);
+        console.error('Sync failed:', error.response?.data || error.message);
         break;
       }
     }
@@ -188,11 +179,10 @@ async function syncWithMainBackend(userId, amount, reference) {
   return { success: false, newBalance: 0 };
 }
 
-// =============== WALLET BALANCE ==================
 router.get('/wallet/balance/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
-    console.log(`💰 Fetching wallet balance for user ${userId}`);
+    console.log(`Fetching wallet balance for user ${userId}`);
 
     const response = await axios.get(`${MAIN_BACKEND_URL}/api/users/balance/${userId}`);
     res.json({
@@ -201,12 +191,11 @@ router.get('/wallet/balance/:userId', async (req, res) => {
       userId,
     });
   } catch (error) {
-    console.error('❌ Wallet balance error:', error.response?.data || error.message);
+    console.error('Wallet balance error:', error.response?.data || error.message);
     res.status(500).json({ success: false, message: 'Could not fetch wallet balance' });
   }
 });
 
-// =============== PAYMENT SUCCESS PAGE ==================
 router.get('/success', (req, res) => {
   const filePath = path.join(__dirname, '../public/payment-success.html');
   res.sendFile(filePath, (err) => {
