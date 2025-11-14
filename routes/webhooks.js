@@ -3,17 +3,39 @@ const router = express.Router();
 const crypto = require('crypto');
 const axios = require('axios');
 const Transaction = require('../models/Transaction');
+
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
 const MAIN_BACKEND_URL = process.env.MAIN_BACKEND_URL || 'https://vtpass-backend.onrender.com';
 
-const bodyParser = require('body-parser');
+// Add this at the top - configure body parser for raw data
+router.use(express.raw({ type: 'application/json' }));
 
-// Enhanced webhook handler with better transaction recovery
-router.post('/paystack', bodyParser.raw({ type: '*/*' }), async (req, res) => {
+// GET endpoint for testing webhook URL
+router.get('/paystack', (req, res) => {
+  console.log('✅ Webhook GET test received');
+  res.json({
+    success: true,
+    message: 'PayStack webhook endpoint is active and ready',
+    endpoint: 'POST /api/webhooks/paystack',
+    timestamp: new Date().toISOString(),
+    instructions: 'Send POST requests with PayStack webhook data to this endpoint'
+  });
+});
+
+// POST endpoint for actual PayStack webhooks
+router.post('/paystack', async (req, res) => {
   let event;
   
   try {
+    console.log('📨 Webhook received from PayStack');
+    
+    // Verify signature
     const signature = req.headers['x-paystack-signature'];
+    if (!signature) {
+      console.log('❌ No signature found in headers');
+      return res.status(401).json({ success: false, message: 'No signature provided' });
+    }
+
     const computedHash = crypto
       .createHmac('sha512', PAYSTACK_SECRET_KEY)
       .update(req.body)
@@ -24,11 +46,12 @@ router.post('/paystack', bodyParser.raw({ type: '*/*' }), async (req, res) => {
       return res.status(401).json({ success: false, message: 'Invalid signature' });
     }
 
+    // Parse the webhook data
     event = JSON.parse(req.body.toString());
     console.log('✅ Valid PayStack webhook received:', event.event);
 
     // Immediate response to PayStack
-    res.json({ success: true, message: 'Webhook received' });
+    res.json({ success: true, message: 'Webhook received successfully' });
 
     // Process webhook asynchronously
     processWebhookEvent(event);
@@ -42,6 +65,8 @@ router.post('/paystack', bodyParser.raw({ type: '*/*' }), async (req, res) => {
 // Async webhook processing
 async function processWebhookEvent(event) {
   try {
+    console.log(`🔄 Processing webhook event: ${event.event}`);
+    
     if (event.event === 'charge.success') {
       await handleSuccessfulCharge(event.data);
     } else if (event.event === 'transfer.success') {
@@ -62,9 +87,7 @@ async function handleSuccessfulCharge(chargeData) {
     console.log('💰 Processing successful charge:', chargeData.reference);
 
     const amountInNaira = chargeData.amount / 100;
-    const userId = chargeData.metadata?.userId || 
-                   chargeData.metadata?.custom_fields?.find(f => f.variable_name === 'user_id')?.value ||
-                   chargeData.customer?.metadata?.userId;
+    const userId = extractUserIdFromChargeData(chargeData);
 
     if (!userId) {
       console.log('❌ No userId found, skipping wallet update');
@@ -94,6 +117,7 @@ async function handleSuccessfulCharge(chargeData) {
       if (transaction.status !== 'success') {
         // Update existing transaction
         transaction.status = 'success';
+        transaction.amount = amountInNaira;
         transaction.gatewayResponse = chargeData;
         await transaction.save();
         console.log('✅ Updated existing transaction:', chargeData.reference);
@@ -111,7 +135,7 @@ async function handleSuccessfulCharge(chargeData) {
         status: 'success',
         gateway: 'paystack',
         gatewayResponse: chargeData,
-        description: 'Wallet funding via Paystack',
+        description: 'Wallet funding via Paystack webhook',
         metadata: {
           paystackData: chargeData,
           source: 'paystack_webhook',
@@ -132,6 +156,14 @@ async function handleSuccessfulCharge(chargeData) {
     // Store failed transaction for later recovery
     await storeFailedTransaction(chargeData, error.message);
   }
+}
+
+// Extract user ID from charge data
+function extractUserIdFromChargeData(chargeData) {
+  return chargeData.metadata?.userId || 
+         chargeData.metadata?.custom_fields?.find(f => f.variable_name === 'user_id')?.value ||
+         chargeData.customer?.metadata?.userId ||
+         chargeData.customer?.email;
 }
 
 // Enhanced sync with retry logic
@@ -181,7 +213,7 @@ async function handleFailedCharge(chargeData) {
   try {
     console.log('❌ Processing failed charge:', chargeData.reference);
     
-    const userId = chargeData.metadata?.userId;
+    const userId = extractUserIdFromChargeData(chargeData);
     if (!userId) return;
 
     // Update or create failed transaction
@@ -212,6 +244,19 @@ async function handleFailedCharge(chargeData) {
     console.log('✅ Failed transaction recorded:', chargeData.reference);
   } catch (error) {
     console.error('❌ Error processing failed charge:', error.message);
+  }
+}
+
+// Handle successful transfers (for virtual accounts)
+async function handleSuccessfulTransfer(transferData) {
+  try {
+    console.log('💳 Processing successful transfer:', transferData.reference);
+    
+    // Add your virtual account transfer logic here
+    // This would handle when money is transferred to your virtual account
+    
+  } catch (error) {
+    console.error('❌ Error processing transfer:', error.message);
   }
 }
 
@@ -265,7 +310,7 @@ router.post('/manual-verify', async (req, res) => {
     }
 
     const amount = verifiedData.amount / 100;
-    const actualUserId = userId || verifiedData.metadata?.userId;
+    const actualUserId = userId || extractUserIdFromChargeData(verifiedData);
 
     if (!actualUserId) {
       return res.status(400).json({ 
@@ -389,22 +434,21 @@ router.post('/recover-transactions', async (req, res) => {
   }
 });
 
+// Test endpoint to check webhook configuration
 router.get('/test', (req, res) => {
   res.json({
     success: true,
-    message: 'Webhook endpoint active',
+    message: 'Webhook endpoint is active and properly configured',
     webhook_url: 'https://virtual-account-backend.onrender.com/api/webhooks/paystack',
     endpoints: [
-      'POST /api/webhooks/paystack',
-      'POST /api/webhooks/manual-verify',
-      'POST /api/webhooks/recover-transactions'
-    ]
+      'GET /api/webhooks/paystack - Test endpoint',
+      'POST /api/webhooks/paystack - PayStack webhook endpoint',
+      'POST /api/webhooks/manual-verify - Manual verification',
+      'POST /api/webhooks/recover-transactions - Transaction recovery'
+    ],
+    environment: process.env.NODE_ENV || 'development',
+    timestamp: new Date().toISOString()
   });
 });
-
-async function handleSuccessfulTransfer(transferData) {
-  console.log('💳 Transfer successful:', transferData.reference);
-  // Add your virtual account transfer logic here
-}
 
 module.exports = router;
