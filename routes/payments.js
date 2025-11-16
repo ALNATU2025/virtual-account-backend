@@ -7,12 +7,15 @@ const Transaction = require('../models/Transaction');
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
 const MAIN_BACKEND_URL = process.env.MAIN_BACKEND_URL || 'https://vtpass-backend.onrender.com';
 
+// CRITICAL: Validate environment variables
 if (!PAYSTACK_SECRET_KEY) {
   console.error('❌ PAYSTACK_SECRET_KEY missing in environment');
   process.exit(1);
 }
 
-// Enhanced payment verification with better error handling
+console.log('✅ Payments API initialized with secure configuration');
+
+// ==================== PAYMENT VERIFICATION ====================
 router.get('/verify', async (req, res) => {
   try {
     const { reference, trxref, redirect = 'true' } = req.query;
@@ -86,6 +89,250 @@ router.get('/verify', async (req, res) => {
     });
   }
 });
+
+// ==================== PAYMENT INITIALIZATION ====================
+router.post('/initialize', async (req, res) => {
+  try {
+    const { userId, email, amount, reference } = req.body;
+    console.log('🚀 Initializing Paystack payment:', { userId, email, amount, reference });
+
+    // Validate required parameters
+    if (!email || !amount || !reference) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Missing required parameters: email, amount, reference' 
+      });
+    }
+
+    if (amount <= 0) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Amount must be greater than 0' 
+      });
+    }
+
+    // Create pending transaction record
+    await Transaction.create({
+      userId,
+      type: 'wallet_funding',
+      amount: amount,
+      reference: reference,
+      status: 'pending',
+      gateway: 'paystack',
+      description: 'Wallet funding initialization',
+      metadata: {
+        source: 'payment_initialization',
+        initializedAt: new Date()
+      }
+    });
+
+    // Initialize PayStack payment
+    const response = await axios.post(
+      'https://api.paystack.co/transaction/initialize',
+      {
+        email: email,
+        amount: amount * 100, // Convert to kobo
+        reference: reference,
+        callback_url: 'https://virtual-account-backend.onrender.com/api/payments/verify?redirect=true',
+        metadata: { 
+          userId: userId,
+          timestamp: new Date().toISOString()
+        },
+      },
+      {
+        headers: { 
+          Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` 
+        },
+        timeout: 15000,
+      }
+    );
+
+    if (!response.data.status) {
+      throw new Error('PayStack initialization failed');
+    }
+
+    console.log('✅ Payment initialized successfully:', reference);
+
+    res.json({
+      success: true,
+      authorizationUrl: response.data.data.authorization_url,
+      reference: response.data.data.reference,
+      accessCode: response.data.data.access_code,
+      message: 'Payment initialized successfully'
+    });
+
+  } catch (error) {
+    console.error('❌ Initialize error:', error.response?.data || error.message);
+    
+    // Update transaction status to failed
+    if (req.body.reference) {
+      await Transaction.findOneAndUpdate(
+        { reference: req.body.reference },
+        { 
+          status: 'failed',
+          gatewayResponse: error.response?.data || { error: error.message }
+        }
+      );
+    }
+
+    res.status(500).json({
+      success: false,
+      message: 'Payment initialization failed',
+      error: error.response?.data?.message || error.message
+    });
+  }
+});
+
+// ==================== MANUAL VERIFICATION ====================
+router.post('/manual-verify', async (req, res) => {
+  try {
+    const { reference, userId } = req.body;
+    
+    if (!reference) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Reference is required' 
+      });
+    }
+
+    console.log('🔍 Manual verification requested:', reference);
+
+    // Use the same verification logic as GET /verify
+    const verifyResponse = await axios.get(
+      `https://api.paystack.co/transaction/verify/${reference}`,
+      {
+        headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` },
+        timeout: 15000,
+      }
+    );
+
+    const data = verifyResponse.data.data;
+
+    if (data.status === 'success') {
+      const amount = data.amount / 100;
+      const actualUserId = userId || extractUserId(data);
+
+      if (!actualUserId) {
+        return res.status(400).json({ 
+          success: false, 
+          message: 'User ID not found in transaction' 
+        });
+      }
+
+      await handleSuccessfulPayment(data, reference, 'false', res);
+    } else {
+      res.status(400).json({
+        success: false,
+        message: `Payment ${data.status}`,
+        status: data.status
+      });
+    }
+
+  } catch (error) {
+    console.error('❌ Manual verification error:', error.message);
+    res.status(500).json({
+      success: false,
+      message: 'Manual verification failed',
+      error: error.message
+    });
+  }
+});
+
+// ==================== TRANSACTION RECOVERY ====================
+router.post('/recover-transactions', async (req, res) => {
+  try {
+    const { userId, days = 30 } = req.body;
+    
+    if (!userId) {
+      return res.status(400).json({ success: false, message: 'User ID is required' });
+    }
+
+    console.log(`🔄 Recovering transactions for user ${userId} from last ${days} days`);
+
+    // Find pending transactions for this user
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - days);
+
+    const pendingTransactions = await Transaction.find({
+      userId: userId,
+      status: { $in: ['pending', 'processing'] },
+      createdAt: { $gte: cutoffDate },
+      gateway: 'paystack'
+    });
+
+    console.log(`📊 Found ${pendingTransactions.length} pending transactions to recover`);
+
+    const recoveryResults = [];
+
+    for (const transaction of pendingTransactions) {
+      try {
+        console.log(`🔍 Verifying pending transaction: ${transaction.reference}`);
+        
+        const verificationResponse = await axios.get(
+          `https://api.paystack.co/transaction/verify/${transaction.reference}`,
+          {
+            headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` },
+            timeout: 10000,
+          }
+        );
+
+        const verifiedData = verificationResponse.data.data;
+
+        if (verifiedData.status === 'success') {
+          // Update transaction status
+          transaction.status = 'success';
+          transaction.gatewayResponse = verifiedData;
+          await transaction.save();
+
+          // Sync with main backend
+          await syncWithMainBackendWithRetry(userId, transaction.amount, transaction.reference);
+
+          recoveryResults.push({
+            reference: transaction.reference,
+            success: true,
+            message: 'Recovered successfully'
+          });
+
+          console.log(`✅ Recovered transaction: ${transaction.reference}`);
+        } else {
+          recoveryResults.push({
+            reference: transaction.reference,
+            success: false,
+            message: `Transaction ${verifiedData.status}`
+          });
+        }
+      } catch (error) {
+        console.error(`❌ Failed to recover transaction ${transaction.reference}:`, error.message);
+        recoveryResults.push({
+          reference: transaction.reference,
+          success: false,
+          error: error.message
+        });
+      }
+
+      // Small delay to avoid rate limiting
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+
+    res.json({
+      success: true,
+      recovered: recoveryResults.filter(r => r.success).length,
+      failed: recoveryResults.filter(r => !r.success).length,
+      details: recoveryResults,
+      message: `Recovery completed: ${recoveryResults.filter(r => r.success).length} transactions recovered`
+    });
+
+  } catch (error) {
+    console.error('❌ Transaction recovery error:', error.message);
+    res.status(500).json({
+      success: false,
+      message: 'Transaction recovery failed',
+      error: error.message
+    });
+  }
+});
+
+// ==================== HELPER FUNCTIONS ====================
 
 // Handle successful payment
 async function handleSuccessfulPayment(data, paymentReference, redirect, res) {
@@ -250,98 +497,6 @@ function extractUserId(data) {
          data.customer?.email;
 }
 
-// Enhanced payment initialization
-router.post('/initialize', async (req, res) => {
-  try {
-    const { userId, email, amount, reference } = req.body;
-    console.log('🚀 Initializing Paystack payment:', { userId, email, amount, reference });
-
-    if (!email || !amount || !reference) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Missing required parameters: email, amount, reference' 
-      });
-    }
-
-    if (amount <= 0) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Amount must be greater than 0' 
-      });
-    }
-
-    // Create pending transaction record
-    await Transaction.create({
-      userId,
-      type: 'wallet_funding',
-      amount: amount,
-      reference: reference,
-      status: 'pending',
-      gateway: 'paystack',
-      description: 'Wallet funding initialization',
-      metadata: {
-        source: 'payment_initialization',
-        initializedAt: new Date()
-      }
-    });
-
-    // Initialize PayStack payment
-    const response = await axios.post(
-      'https://api.paystack.co/transaction/initialize',
-      {
-        email: email,
-        amount: amount * 100, // Convert to kobo
-        reference: reference,
-        callback_url: 'https://virtual-account-backend.onrender.com/api/payments/verify?redirect=true',
-        metadata: { 
-          userId: userId,
-          timestamp: new Date().toISOString()
-        },
-      },
-      {
-        headers: { 
-          Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` 
-        },
-        timeout: 15000,
-      }
-    );
-
-    if (!response.data.status) {
-      throw new Error('PayStack initialization failed');
-    }
-
-    console.log('✅ Payment initialized successfully:', reference);
-
-    res.json({
-      success: true,
-      authorizationUrl: response.data.data.authorization_url,
-      reference: response.data.data.reference,
-      accessCode: response.data.data.access_code,
-      message: 'Payment initialized successfully'
-    });
-
-  } catch (error) {
-    console.error('❌ Initialize error:', error.response?.data || error.message);
-    
-    // Update transaction status to failed
-    if (req.body.reference) {
-      await Transaction.findOneAndUpdate(
-        { reference: req.body.reference },
-        { 
-          status: 'failed',
-          gatewayResponse: error.response?.data || { error: error.message }
-        }
-      );
-    }
-
-    res.status(500).json({
-      success: false,
-      message: 'Payment initialization failed',
-      error: error.response?.data?.message || error.message
-    });
-  }
-});
-
 // Enhanced sync with main backend
 async function syncWithMainBackend(userId, amount, reference) {
   let retries = 0;
@@ -422,6 +577,48 @@ async function syncWithMainBackend(userId, amount, reference) {
   };
 }
 
+// Enhanced sync with retry logic
+async function syncWithMainBackendWithRetry(userId, amount, reference, maxRetries = 3) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`🔄 Syncing with main backend (Attempt ${attempt}/${maxRetries})`);
+      
+      const response = await axios.post(
+        `${MAIN_BACKEND_URL}/api/wallet/top-up`,
+        {
+          userId: userId,
+          amount: amount,
+          reference: reference,
+          type: 'credit',
+          description: `Wallet funding via PayStack - Ref: ${reference}`,
+          source: 'paystack_webhook',
+          timestamp: new Date().toISOString()
+        },
+        {
+          timeout: 10000,
+          headers: { 'Content-Type': 'application/json' }
+        }
+      );
+
+      if (response.data.success) {
+        console.log('✅ Main backend sync successful');
+        return true;
+      } else {
+        throw new Error(response.data.message || 'Main backend rejected sync');
+      }
+    } catch (error) {
+      console.error(`❌ Sync attempt ${attempt} failed:`, error.message);
+      
+      if (attempt === maxRetries) {
+        throw error;
+      }
+      
+      // Wait before retry (exponential backoff)
+      await new Promise(resolve => setTimeout(resolve, attempt * 2000));
+    }
+  }
+}
+
 // Store failed sync attempt
 async function storeFailedSync(userId, amount, reference, error) {
   try {
@@ -457,60 +654,7 @@ async function storeVerificationAttempt(reference, error) {
   }
 }
 
-// Manual verification endpoint
-router.post('/manual-verify', async (req, res) => {
-  try {
-    const { reference, userId } = req.body;
-    
-    if (!reference) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Reference is required' 
-      });
-    }
-
-    console.log('🔍 Manual verification requested:', reference);
-
-    // Use the same verification logic as GET /verify
-    const verifyResponse = await axios.get(
-      `https://api.paystack.co/transaction/verify/${reference}`,
-      {
-        headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` },
-        timeout: 15000,
-      }
-    );
-
-    const data = verifyResponse.data.data;
-
-    if (data.status === 'success') {
-      const amount = data.amount / 100;
-      const actualUserId = userId || extractUserId(data);
-
-      if (!actualUserId) {
-        return res.status(400).json({ 
-          success: false, 
-          message: 'User ID not found in transaction' 
-        });
-      }
-
-      await handleSuccessfulPayment(data, reference, 'false', res);
-    } else {
-      res.status(400).json({
-        success: false,
-        message: `Payment ${data.status}`,
-        status: data.status
-      });
-    }
-
-  } catch (error) {
-    console.error('❌ Manual verification error:', error.message);
-    res.status(500).json({
-      success: false,
-      message: 'Manual verification failed',
-      error: error.message
-    });
-  }
-});
+// ==================== UTILITY ENDPOINTS ====================
 
 // Wallet balance endpoint
 router.get('/wallet/balance/:userId', async (req, res) => {
@@ -562,6 +706,22 @@ router.get('/health', (req, res) => {
     message: 'Payments API is healthy',
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development'
+  });
+});
+
+// Test endpoint to check configuration
+router.get('/test', (req, res) => {
+  res.json({
+    success: true,
+    message: 'Payments API is active and properly configured',
+    endpoints: [
+      'GET /api/payments/verify - Payment verification',
+      'POST /api/payments/initialize - Payment initialization',
+      'POST /api/payments/manual-verify - Manual verification',
+      'POST /api/payments/recover-transactions - Transaction recovery'
+    ],
+    environment: process.env.NODE_ENV || 'development',
+    timestamp: new Date().toISOString()
   });
 });
 
