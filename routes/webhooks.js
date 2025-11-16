@@ -173,13 +173,11 @@ function extractUserIdFromChargeData(chargeData) {
          chargeData.customer?.email;
 }
 
-// Enhanced sync with retry logic
-// Enhanced sync with better error handling and logging
+// PRODUCTION: Enhanced sync with main backend
 async function syncWithMainBackendWithRetry(userId, amount, reference, maxRetries = 3) {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      console.log(`🔄 Syncing with main backend (Attempt ${attempt}/${maxRetries})`);
-      console.log('📦 Sync payload:', { userId, amount, reference });
+      console.log(`🔄 PRODUCTION: Syncing with main backend (Attempt ${attempt}/${maxRetries})`);
       
       const response = await axios.post(
         `${MAIN_BACKEND_URL}/api/wallet/top-up`,
@@ -199,13 +197,9 @@ async function syncWithMainBackendWithRetry(userId, amount, reference, maxRetrie
         }
       );
 
-      console.log('✅ Main backend sync response:', {
-        status: response.status,
-        data: response.data
-      });
+      console.log('✅ PRODUCTION: Main backend sync successful');
 
       if (response.data.success) {
-        console.log('✅ Main backend sync successful');
         return {
           success: true,
           data: response.data
@@ -214,18 +208,11 @@ async function syncWithMainBackendWithRetry(userId, amount, reference, maxRetrie
         throw new Error(response.data.message || 'Main backend rejected sync');
       }
     } catch (error) {
-      console.error(`❌ Sync attempt ${attempt} failed:`, error.message);
+      console.error(`❌ PRODUCTION: Sync attempt ${attempt} failed:`, error.message);
       
-      // Enhanced error logging
       if (error.response) {
         console.error('Response status:', error.response.status);
         console.error('Response data:', error.response.data);
-        console.error('Response headers:', error.response.headers);
-      } else if (error.request) {
-        console.error('No response received. Request details:', {
-          url: `${MAIN_BACKEND_URL}/api/wallet/top-up`,
-          method: 'POST'
-        });
       }
       
       if (attempt === maxRetries) {
@@ -234,7 +221,6 @@ async function syncWithMainBackendWithRetry(userId, amount, reference, maxRetrie
       
       // Wait before retry (exponential backoff)
       const delay = attempt * 2000;
-      console.log(`⏳ Waiting ${delay}ms before retry...`);
       await new Promise(resolve => setTimeout(resolve, delay));
     }
   }
