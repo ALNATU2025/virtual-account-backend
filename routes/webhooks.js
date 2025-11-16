@@ -324,9 +324,10 @@ async function storeFailedTransaction(chargeData, error) {
 }
 
 // Manual verification endpoint for old transactions
+// FIXED manual verify endpoint - Use correct user ID format
 router.post('/manual-verify', async (req, res) => {
   try {
-    const { reference, userId } = req.body;
+    const { reference, userId, userEmail } = req.body;
     
     if (!reference) {
       return res.status(400).json({ success: false, message: 'Reference is required' });
@@ -338,7 +339,7 @@ router.post('/manual-verify', async (req, res) => {
     const verificationResponse = await axios.get(
       `https://api.paystack.co/transaction/verify/${reference}`,
       {
-        headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` },
+        headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}` },
         timeout: 10000,
       }
     );
@@ -354,23 +355,58 @@ router.post('/manual-verify', async (req, res) => {
     }
 
     const amount = verifiedData.amount / 100;
-    const actualUserId = userId || extractUserIdFromChargeData(verifiedData);
+    
+    // FIX: Get the actual user ID from your database using email
+    let actualUserId = userId;
+    if (!actualUserId && userEmail) {
+      // Query your user database to get the MongoDB ObjectId
+      try {
+        const userResponse = await axios.get(`${MAIN_BACKEND_URL}/api/users/find-by-email/${userEmail}`);
+        if (userResponse.data.success) {
+          actualUserId = userResponse.data.user._id;
+        }
+      } catch (error) {
+        console.error('Error fetching user by email:', error);
+      }
+    }
 
     if (!actualUserId) {
       return res.status(400).json({ 
         success: false, 
-        message: 'User ID not found in transaction' 
+        message: 'User ID not found. Please provide userId or userEmail.' 
       });
     }
 
-    // Process the transaction
-    await handleSuccessfulCharge(verifiedData);
+    // Process the transaction with correct user ID
+    await handleSuccessfulCharge({
+      ...verifiedData,
+      metadata: {
+        ...verifiedData.metadata,
+        userId: actualUserId // Use the correct MongoDB ObjectId
+      }
+    });
+
+    // Get updated balance from main backend
+    let newBalance = 0;
+    try {
+      const balanceResponse = await axios.get(`${MAIN_BACKEND_URL}/api/users/balance`, {
+        headers: {
+          'Authorization': `Bearer ${req.headers.authorization?.split(' ')[1]}`,
+        }
+      });
+      if (balanceResponse.data.success) {
+        newBalance = balanceResponse.data.walletBalance;
+      }
+    } catch (error) {
+      console.error('Error fetching updated balance:', error);
+    }
 
     res.json({
       success: true,
       message: 'Transaction verified and processed successfully',
       amount: amount,
       reference: reference,
+      newBalance: newBalance,
       userId: actualUserId
     });
 
