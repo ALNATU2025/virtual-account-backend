@@ -13,7 +13,11 @@ if (!PAYSTACK_SECRET_KEY) {
 
 const MAIN_BACKEND_URL = process.env.MAIN_BACKEND_URL || 'https://vtpass-backend.onrender.com';
 
-// Add this at the top - configure body parser for raw data
+// Circuit breaker for sync failures
+let consecutiveFailures = 0;
+const MAX_CONSECUTIVE_FAILURES = 5;
+
+// Configure body parser for raw data
 router.use(express.raw({ type: 'application/json' }));
 
 // GET endpoint for testing webhook URL
@@ -28,7 +32,6 @@ router.get('/paystack', (req, res) => {
   });
 });
 
-// POST endpoint for actual PayStack webhooks
 // POST endpoint for actual PayStack webhooks - FIXED VERSION
 router.post('/paystack', async (req, res) => {
   console.log('📨 Webhook received from PayStack');
@@ -52,8 +55,14 @@ router.post('/paystack', async (req, res) => {
       return res.status(401).json({ success: false, message: 'Invalid signature' });
     }
 
-    // Parse the webhook data
+    // Parse and validate the webhook data
     const event = JSON.parse(req.body.toString());
+    
+    if (!validateWebhookEvent(event)) {
+      console.log('❌ Invalid webhook event structure');
+      return res.status(400).json({ success: false, message: 'Invalid event structure' });
+    }
+
     console.log('✅ Valid PayStack webhook received:', event.event);
 
     // IMMEDIATELY respond to Paystack to prevent retries
@@ -69,19 +78,41 @@ router.post('/paystack', async (req, res) => {
   }
 });
 
+// Validate webhook event structure
+function validateWebhookEvent(event) {
+  if (!event || !event.event || !event.data) {
+    console.error('Invalid webhook event structure:', event);
+    return false;
+  }
+  
+  const validEvents = ['charge.success', 'transfer.success', 'charge.failed', 'transfer.failed'];
+  if (!validEvents.includes(event.event)) {
+    console.log(`⚠️ Unsupported event type: ${event.event}`);
+  }
+  
+  return true;
+}
+
 // Async webhook processing
 async function processWebhookEvent(event) {
   try {
     console.log(`🔄 Processing webhook event: ${event.event}`);
     
-    if (event.event === 'charge.success') {
-      await handleSuccessfulCharge(event.data);
-    } else if (event.event === 'transfer.success') {
-      await handleSuccessfulTransfer(event.data);
-    } else if (event.event === 'charge.failed') {
-      await handleFailedCharge(event.data);
-    } else {
-      console.log(`ℹ️ Unhandled webhook event: ${event.event}`);
+    switch (event.event) {
+      case 'charge.success':
+        await handleSuccessfulCharge(event.data);
+        break;
+      case 'transfer.success':
+        await handleSuccessfulTransfer(event.data);
+        break;
+      case 'charge.failed':
+        await handleFailedCharge(event.data);
+        break;
+      case 'transfer.failed':
+        await handleFailedTransfer(event.data);
+        break;
+      default:
+        console.log(`ℹ️ Unhandled webhook event: ${event.event}`);
     }
   } catch (error) {
     console.error('❌ Error processing webhook event:', error);
@@ -93,11 +124,13 @@ async function handleSuccessfulCharge(chargeData) {
   try {
     console.log('💰 Processing successful charge:', chargeData.reference);
 
+    // Convert amount to Naira (Paystack amounts are in kobo)
     const amountInNaira = chargeData.amount / 100;
     const userId = extractUserIdFromChargeData(chargeData);
 
     if (!userId) {
       console.log('❌ No userId found, skipping wallet update');
+      await storeFailedTransaction(chargeData, 'No user ID found in charge data');
       return;
     }
 
@@ -108,12 +141,16 @@ async function handleSuccessfulCharge(chargeData) {
         headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` },
         timeout: 10000,
       }
-    );
+    ).catch(error => {
+      console.error('PayStack verification failed:', error.response?.data || error.message);
+      throw new Error(`PayStack verification failed: ${error.message}`);
+    });
 
     const verifiedData = verificationResponse.data.data;
 
     if (verifiedData.status !== 'success') {
       console.log('❌ Transaction not successful:', verifiedData.status);
+      await handleFailedCharge(verifiedData);
       return;
     }
 
@@ -170,45 +207,31 @@ function extractUserIdFromChargeData(chargeData) {
   return chargeData.metadata?.userId || 
          chargeData.metadata?.custom_fields?.find(f => f.variable_name === 'user_id')?.value ||
          chargeData.customer?.metadata?.userId ||
+         chargeData.metadata?.user_id ||
          chargeData.customer?.email;
 }
 
+// Enhanced sync with main backend - FIXED VERSION
+async function syncWithMainBackendWithRetry(userId, amount, reference, maxRetries = 3) {
+  // Check circuit breaker
+  if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+    throw new Error('Circuit breaker open - too many consecutive sync failures');
+  }
 
-// PRODUCTION: Enhanced sync with main backend - FIXED VERSION
-// FIXED: Enhanced sync with correct user ID handling
-async function syncWithMainBackendWithRetry(userData, amount, reference, maxRetries = 3) {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      console.log(`🔄 PRODUCTION: Syncing with main backend (Attempt ${attempt}/${maxRetries})`);
+      console.log(`🔄 Syncing with main backend (Attempt ${attempt}/${maxRetries}) for user: ${userId}`);
       
-      // FIX: Get correct user ID if email is provided
-      let userId = userData.userId;
-      if (!userId && userData.userEmail) {
-        try {
-          const userResponse = await axios.get(`${MAIN_BACKEND_URL}/api/users/find-by-email/${userData.userEmail}`);
-          if (userResponse.data.success) {
-            userId = userResponse.data.user._id;
-            console.log('✅ Found user ID by email:', userId);
-          }
-        } catch (error) {
-          console.error('Error finding user by email:', error);
-        }
-      }
-
-      if (!userId) {
-        throw new Error('User ID not found for sync');
-      }
-
       const syncPayload = {
-        userId: userId, // Use correct MongoDB ObjectId
-        amount: amount, // Keep as kobo
+        userId: userId,
+        amount: amount, // Amount in Naira
         reference: reference,
         description: `Wallet funding via PayStack - Ref: ${reference}`,
         source: 'paystack_webhook',
         timestamp: new Date().toISOString()
       };
 
-      console.log('📦 Sync payload with correct user ID:', syncPayload);
+      console.log('📦 Sync payload:', { ...syncPayload, amount: `${amount} Naira` });
 
       const response = await axios.post(
         `${MAIN_BACKEND_URL}/api/wallet/top-up`,
@@ -221,7 +244,8 @@ async function syncWithMainBackendWithRetry(userData, amount, reference, maxRetr
         }
       );
 
-      console.log('✅ PRODUCTION: Main backend sync successful');
+      console.log('✅ Main backend sync successful');
+      consecutiveFailures = 0; // Reset circuit breaker on success
 
       if (response.data.success) {
         return {
@@ -232,13 +256,18 @@ async function syncWithMainBackendWithRetry(userData, amount, reference, maxRetr
         throw new Error(response.data.message || 'Main backend rejected sync');
       }
     } catch (error) {
-      console.error(`❌ PRODUCTION: Sync attempt ${attempt} failed:`, error.message);
+      consecutiveFailures++;
+      console.error(`❌ Sync attempt ${attempt} failed:`, error.message);
       
       if (attempt === maxRetries) {
-        throw new Error(`All sync attempts failed. Last error: ${error.message}`);
+        const finalError = `All sync attempts failed. Last error: ${error.message}`;
+        console.error(finalError);
+        throw new Error(finalError);
       }
       
-      const delay = attempt * 2000;
+      // Exponential backoff
+      const delay = Math.min(attempt * 2000, 10000);
+      console.log(`⏳ Retrying in ${delay}ms...`);
       await new Promise(resolve => setTimeout(resolve, delay));
     }
   }
@@ -250,7 +279,10 @@ async function handleFailedCharge(chargeData) {
     console.log('❌ Processing failed charge:', chargeData.reference);
     
     const userId = extractUserIdFromChargeData(chargeData);
-    if (!userId) return;
+    if (!userId) {
+      console.log('❌ No userId found for failed charge');
+      return;
+    }
 
     // Update or create failed transaction
     let transaction = await Transaction.findOne({ reference: chargeData.reference });
@@ -259,6 +291,7 @@ async function handleFailedCharge(chargeData) {
       transaction.status = 'failed';
       transaction.gatewayResponse = chargeData;
       await transaction.save();
+      console.log('✅ Updated existing transaction to failed:', chargeData.reference);
     } else {
       await Transaction.create({
         userId,
@@ -272,14 +305,25 @@ async function handleFailedCharge(chargeData) {
         metadata: {
           paystackData: chargeData,
           source: 'paystack_webhook',
-          failedAt: new Date()
+          failedAt: new Date(),
+          failureReason: chargeData.gateway_response || 'Unknown error'
         }
       });
+      console.log('✅ New failed transaction recorded:', chargeData.reference);
     }
 
-    console.log('✅ Failed transaction recorded:', chargeData.reference);
   } catch (error) {
     console.error('❌ Error processing failed charge:', error.message);
+  }
+}
+
+// Handle failed transfers
+async function handleFailedTransfer(transferData) {
+  try {
+    console.log('❌ Processing failed transfer:', transferData.reference);
+    // Add your failed transfer logic here
+  } catch (error) {
+    console.error('❌ Error processing failed transfer:', error.message);
   }
 }
 
@@ -306,7 +350,8 @@ async function storeFailedTransaction(chargeData, error) {
       chargeData: chargeData,
       error: error,
       attemptCount: 0,
-      lastAttempt: new Date()
+      lastAttempt: new Date(),
+      userId: extractUserIdFromChargeData(chargeData)
     });
     
     console.log('💾 Stored failed transaction for recovery:', chargeData.reference);
@@ -316,7 +361,6 @@ async function storeFailedTransaction(chargeData, error) {
 }
 
 // Manual verification endpoint for old transactions
-// FIXED manual verify endpoint - Use correct user ID format
 router.post('/manual-verify', async (req, res) => {
   try {
     const { reference, userId, userEmail } = req.body;
@@ -331,10 +375,12 @@ router.post('/manual-verify', async (req, res) => {
     const verificationResponse = await axios.get(
       `https://api.paystack.co/transaction/verify/${reference}`,
       {
-        headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}` },
+        headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` },
         timeout: 10000,
       }
-    );
+    ).catch(error => {
+      throw new Error(`PayStack verification failed: ${error.response?.data?.message || error.message}`);
+    });
 
     const verifiedData = verificationResponse.data.data;
 
@@ -346,19 +392,19 @@ router.post('/manual-verify', async (req, res) => {
       });
     }
 
-    const amount = verifiedData.amount / 100;
+    const amountInNaira = verifiedData.amount / 100;
     
-    // FIX: Get the actual user ID from your database using email
+    // Get the actual user ID
     let actualUserId = userId;
     if (!actualUserId && userEmail) {
-      // Query your user database to get the MongoDB ObjectId
       try {
-        const userResponse = await axios.get(`${MAIN_BACKEND_URL}/api/users/find-by-email/${userEmail}`);
+        const userResponse = await axios.get(`${MAIN_BACKEND_URL}/api/users/find-by-email/${encodeURIComponent(userEmail)}`);
         if (userResponse.data.success) {
           actualUserId = userResponse.data.user._id;
+          console.log('✅ Found user ID by email:', actualUserId);
         }
       } catch (error) {
-        console.error('Error fetching user by email:', error);
+        console.error('Error fetching user by email:', error.message);
       }
     }
 
@@ -374,31 +420,15 @@ router.post('/manual-verify', async (req, res) => {
       ...verifiedData,
       metadata: {
         ...verifiedData.metadata,
-        userId: actualUserId // Use the correct MongoDB ObjectId
+        userId: actualUserId
       }
     });
-
-    // Get updated balance from main backend
-    let newBalance = 0;
-    try {
-      const balanceResponse = await axios.get(`${MAIN_BACKEND_URL}/api/users/balance`, {
-        headers: {
-          'Authorization': `Bearer ${req.headers.authorization?.split(' ')[1]}`,
-        }
-      });
-      if (balanceResponse.data.success) {
-        newBalance = balanceResponse.data.walletBalance;
-      }
-    } catch (error) {
-      console.error('Error fetching updated balance:', error);
-    }
 
     res.json({
       success: true,
       message: 'Transaction verified and processed successfully',
-      amount: amount,
+      amount: amountInNaira,
       reference: reference,
-      newBalance: newBalance,
       userId: actualUserId
     });
 
@@ -423,24 +453,24 @@ router.post('/recover-transactions', async (req, res) => {
 
     console.log(`🔄 Recovering transactions for user ${userId} from last ${days} days`);
 
-    // Find pending transactions for this user
+    // Find pending or failed transactions for this user
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - days);
 
     const pendingTransactions = await Transaction.find({
       userId: userId,
-      status: { $in: ['pending', 'processing'] },
+      status: { $in: ['pending', 'processing', 'failed'] },
       createdAt: { $gte: cutoffDate },
       gateway: 'paystack'
     });
 
-    console.log(`📊 Found ${pendingTransactions.length} pending transactions to recover`);
+    console.log(`📊 Found ${pendingTransactions.length} transactions to recover`);
 
     const recoveryResults = [];
 
     for (const transaction of pendingTransactions) {
       try {
-        console.log(`🔍 Verifying pending transaction: ${transaction.reference}`);
+        console.log(`🔍 Verifying transaction: ${transaction.reference}`);
         
         const verificationResponse = await axios.get(
           `https://api.paystack.co/transaction/verify/${transaction.reference}`,
@@ -516,14 +546,29 @@ router.get('/test', (req, res) => {
       'GET /api/webhooks/paystack - Test endpoint',
       'POST /api/webhooks/paystack - PayStack webhook endpoint',
       'POST /api/webhooks/manual-verify - Manual verification',
-      'POST /api/webhooks/recover-transactions - Transaction recovery'
+      'POST /api/webhooks/recover-transactions - Transaction recovery',
+      'GET /api/webhooks/health - Health check'
     ],
     environment: process.env.NODE_ENV || 'development',
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    consecutiveFailures,
+    circuitBreaker: consecutiveFailures >= MAX_CONSECUTIVE_FAILURES ? 'OPEN' : 'CLOSED'
   });
 });
 
-
-
+// Health check endpoint
+router.get('/health', (req, res) => {
+  const health = {
+    status: 'OK',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+    paystackKey: !!PAYSTACK_SECRET_KEY,
+    mainBackend: MAIN_BACKEND_URL,
+    consecutiveFailures,
+    circuitBreaker: consecutiveFailures >= MAX_CONSECUTIVE_FAILURES ? 'OPEN' : 'CLOSED'
+  };
+  res.json(health);
+});
 
 module.exports = router;
