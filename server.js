@@ -5,44 +5,33 @@ require('dotenv').config();
 
 const app = express();
 
-// Enhanced CORS configuration
-const allowedOrigins = [
-  'http://localhost:3000',
-  'http://localhost:5000',
-  'http://localhost:8000',
-  'http://localhost:8080',
-  'http://127.0.0.1:3000',
-  'http://127.0.0.1:5000',
-  'http://localhost',
-  'https://virtual-account-backend.onrender.com',
-  'exp://*.expo.dev',
-  'http://*.expo.dev',
-  // Add your Flutter web domains here
-  'https://your-app.com', // Replace with your actual domain
-  'http://your-app.com',  // Replace with your actual domain
-];
-
+// SIMPLIFIED CORS Configuration - Allow all origins in development
 const corsOptions = {
   origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps, Postman, curl)
-    if (!origin) return callback(null, true);
+    // In development, allow ALL origins
+    if (process.env.NODE_ENV === 'development') {
+      console.log('🌐 DEVELOPMENT: Allowing origin:', origin);
+      return callback(null, true);
+    }
     
-    if (allowedOrigins.indexOf(origin) !== -1) {
+    // In production, use your allowed origins
+    const allowedOrigins = [
+      'https://virtual-account-backend.onrender.com',
+      'https://your-app.com', // Your production domain
+      'https://www.your-app.com',
+    ];
+    
+    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
       callback(null, true);
     } else {
-      console.log('🚫 CORS blocked for origin:', origin);
-      // For development, you might want to allow all origins
-      if (process.env.NODE_ENV === 'development') {
-        callback(null, true);
-      } else {
-        callback(new Error('Not allowed by CORS'));
-      }
+      console.log('🚫 PRODUCTION: CORS blocked for origin:', origin);
+      callback(new Error('Not allowed by CORS'));
     }
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: [
     'Content-Type',
-    'Authorization',
+    'Authorization', 
     'X-Requested-With',
     'Accept',
     'Origin',
@@ -50,23 +39,14 @@ const corsOptions = {
     'X-Client-Version',
     'X-Client-Platform',
     'X-User-ID',
-    'Access-Control-Allow-Origin'
-  ],
-  exposedHeaders: [
-    'Content-Length',
-    'X-Request-ID',
-    'X-Powered-By'
   ],
   credentials: true,
-  maxAge: 86400, // 24 hours
-  preflightContinue: false,
+  maxAge: 86400,
   optionsSuccessStatus: 204
 };
 
-// Apply CORS middleware BEFORE other middleware
+// Apply CORS middleware
 app.use(cors(corsOptions));
-
-// Handle preflight requests globally
 app.options('*', cors(corsOptions));
 
 // Other middleware
@@ -87,7 +67,7 @@ app.use('/api/wallet', walletRoutes);
 
 console.log('✅ All routes mounted successfully');
 
-// Add the PayStack proxy endpoint directly in server.js for testing
+// Add the PayStack proxy endpoint
 app.post('/api/payments/verify-paystack', async (req, res) => {
   try {
     const { reference } = req.body;
@@ -101,7 +81,7 @@ app.post('/api/payments/verify-paystack', async (req, res) => {
 
     console.log('🔍 Proxy: Verifying PayStack transaction:', reference);
 
-    // Call PayStack API from backend (no CORS issues)
+    // Call PayStack API from backend
     const paystackResponse = await fetch(`https://api.paystack.co/transaction/verify/${reference}`, {
       method: 'GET',
       headers: {
@@ -112,7 +92,7 @@ app.post('/api/payments/verify-paystack', async (req, res) => {
 
     const data = await paystackResponse.json();
     
-    console.log('📡 PayStack proxy response status:', data.status);
+    console.log('📡 PayStack proxy response:', data.status);
 
     if (data.status && data.data && data.data.status === 'success') {
       res.json({
@@ -150,18 +130,7 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development',
     database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-    cors: {
-      enabled: true,
-      allowedOrigins: allowedOrigins.length
-    },
-    endpoints: [
-      'GET /health',
-      'POST /api/payments/verify-paystack - PayStack proxy',
-      'GET /api/webhooks/paystack - Test webhook',
-      'POST /api/webhooks/paystack - PayStack webhooks',
-      'GET /api/payments/verify - Verify payment',
-      'POST /api/payments/initialize - Initialize payment'
-    ]
+    cors: 'Enabled - All origins allowed in development'
   });
 });
 
@@ -171,9 +140,8 @@ app.get('/', (req, res) => {
     success: true,
     message: 'Virtual Account Backend is running successfully',
     version: '1.0.0',
-    cors: 'Enabled with enhanced configuration',
+    environment: process.env.NODE_ENV || 'development',
     webhook_url: 'https://virtual-account-backend.onrender.com/api/webhooks/paystack',
-    health_check: 'https://virtual-account-backend.onrender.com/health',
     paystack_proxy: 'https://virtual-account-backend.onrender.com/api/payments/verify-paystack'
   });
 });
@@ -182,15 +150,7 @@ app.get('/', (req, res) => {
 app.use('*', (req, res) => {
   res.status(404).json({
     success: false,
-    message: `Route ${req.originalUrl} not found`,
-    available_endpoints: [
-      'GET /health',
-      'POST /api/payments/verify-paystack',
-      'GET /api/webhooks/paystack',
-      'POST /api/webhooks/paystack',
-      'GET /api/payments/verify',
-      'POST /api/payments/initialize'
-    ]
+    message: `Route ${req.originalUrl} not found`
   });
 });
 
@@ -216,10 +176,8 @@ mongoose.connect(process.env.MONGODB_URI, {
   app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-    console.log(`🔗 Webhook URL: https://virtual-account-backend.onrender.com/api/webhooks/paystack`);
+    console.log(`🌐 CORS: All origins allowed in development`);
     console.log(`🔗 PayStack Proxy: https://virtual-account-backend.onrender.com/api/payments/verify-paystack`);
-    console.log(`❤️ Health check: https://virtual-account-backend.onrender.com/health`);
-    console.log(`🌐 CORS: Enabled for ${allowedOrigins.length} origins`);
   });
 })
 .catch(err => {
