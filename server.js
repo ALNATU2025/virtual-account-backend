@@ -5,29 +5,10 @@ require('dotenv').config();
 
 const app = express();
 
-// SIMPLIFIED CORS Configuration - Allow all origins in development
-const corsOptions = {
-  origin: function (origin, callback) {
-    // In development, allow ALL origins
-    if (process.env.NODE_ENV === 'development') {
-      console.log('🌐 DEVELOPMENT: Allowing origin:', origin);
-      return callback(null, true);
-    }
-    
-    // In production, use your allowed origins
-    const allowedOrigins = [
-      'https://virtual-account-backend.onrender.com',
-      'https://your-app.com', // Your production domain
-      'https://www.your-app.com',
-    ];
-    
-    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
-      callback(null, true);
-    } else {
-      console.log('🚫 PRODUCTION: CORS blocked for origin:', origin);
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
+// ALLOW ALL ORIGINS - Simple CORS fix
+app.use(cors({
+  origin: true, // Allow all origins
+  credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: [
     'Content-Type',
@@ -40,14 +21,10 @@ const corsOptions = {
     'X-Client-Platform',
     'X-User-ID',
   ],
-  credentials: true,
-  maxAge: 86400,
-  optionsSuccessStatus: 204
-};
+}));
 
-// Apply CORS middleware
-app.use(cors(corsOptions));
-app.options('*', cors(corsOptions));
+// Handle preflight requests
+app.options('*', cors());
 
 // Other middleware
 app.use(express.json({ limit: '10mb' }));
@@ -67,7 +44,7 @@ app.use('/api/wallet', walletRoutes);
 
 console.log('✅ All routes mounted successfully');
 
-// Add the PayStack proxy endpoint
+// PayStack proxy endpoint
 app.post('/api/payments/verify-paystack', async (req, res) => {
   try {
     const { reference } = req.body;
@@ -130,7 +107,7 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development',
     database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-    cors: 'Enabled - All origins allowed in development'
+    cors: 'Enabled - All origins allowed'
   });
 });
 
@@ -140,7 +117,7 @@ app.get('/', (req, res) => {
     success: true,
     message: 'Virtual Account Backend is running successfully',
     version: '1.0.0',
-    environment: process.env.NODE_ENV || 'development',
+    cors: 'Enabled - All origins allowed',
     webhook_url: 'https://virtual-account-backend.onrender.com/api/webhooks/paystack',
     paystack_proxy: 'https://virtual-account-backend.onrender.com/api/payments/verify-paystack'
   });
@@ -176,7 +153,7 @@ mongoose.connect(process.env.MONGODB_URI, {
   app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-    console.log(`🌐 CORS: All origins allowed in development`);
+    console.log(`🌐 CORS: All origins allowed`);
     console.log(`🔗 PayStack Proxy: https://virtual-account-backend.onrender.com/api/payments/verify-paystack`);
   });
 })
