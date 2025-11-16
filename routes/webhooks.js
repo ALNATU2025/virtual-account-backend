@@ -174,43 +174,68 @@ function extractUserIdFromChargeData(chargeData) {
 }
 
 // Enhanced sync with retry logic
+// Enhanced sync with better error handling and logging
 async function syncWithMainBackendWithRetry(userId, amount, reference, maxRetries = 3) {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       console.log(`🔄 Syncing with main backend (Attempt ${attempt}/${maxRetries})`);
+      console.log('📦 Sync payload:', { userId, amount, reference });
       
       const response = await axios.post(
         `${MAIN_BACKEND_URL}/api/wallet/top-up`,
         {
-          userId,
-          amount,
-          reference,
-          type: 'credit',
+          userId: userId,
+          amount: amount,
+          reference: reference,
           description: `Wallet funding via PayStack - Ref: ${reference}`,
           source: 'paystack_webhook',
           timestamp: new Date().toISOString()
         },
         {
           timeout: 10000,
-          headers: { 'Content-Type': 'application/json' }
+          headers: { 
+            'Content-Type': 'application/json'
+          }
         }
       );
 
+      console.log('✅ Main backend sync response:', {
+        status: response.status,
+        data: response.data
+      });
+
       if (response.data.success) {
         console.log('✅ Main backend sync successful');
-        return true;
+        return {
+          success: true,
+          data: response.data
+        };
       } else {
         throw new Error(response.data.message || 'Main backend rejected sync');
       }
     } catch (error) {
       console.error(`❌ Sync attempt ${attempt} failed:`, error.message);
       
+      // Enhanced error logging
+      if (error.response) {
+        console.error('Response status:', error.response.status);
+        console.error('Response data:', error.response.data);
+        console.error('Response headers:', error.response.headers);
+      } else if (error.request) {
+        console.error('No response received. Request details:', {
+          url: `${MAIN_BACKEND_URL}/api/wallet/top-up`,
+          method: 'POST'
+        });
+      }
+      
       if (attempt === maxRetries) {
-        throw error;
+        throw new Error(`All sync attempts failed. Last error: ${error.message}`);
       }
       
       // Wait before retry (exponential backoff)
-      await new Promise(resolve => setTimeout(resolve, attempt * 2000));
+      const delay = attempt * 2000;
+      console.log(`⏳ Waiting ${delay}ms before retry...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
     }
   }
 }
@@ -457,5 +482,8 @@ router.get('/test', (req, res) => {
     timestamp: new Date().toISOString()
   });
 });
+
+
+
 
 module.exports = router;
