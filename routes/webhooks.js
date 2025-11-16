@@ -5,6 +5,12 @@ const axios = require('axios');
 const Transaction = require('../models/Transaction');
 
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
+// CRITICAL: Check if secret key exists
+if (!PAYSTACK_SECRET_KEY) {
+  console.error('❌ PAYSTACK_SECRET_KEY is missing in environment variables');
+  throw new Error('PAYSTACK_SECRET_KEY is required for webhooks');
+}
+
 const MAIN_BACKEND_URL = process.env.MAIN_BACKEND_URL || 'https://vtpass-backend.onrender.com';
 
 // Add this at the top - configure body parser for raw data
@@ -23,19 +29,19 @@ router.get('/paystack', (req, res) => {
 });
 
 // POST endpoint for actual PayStack webhooks
+// POST endpoint for actual PayStack webhooks - FIXED VERSION
 router.post('/paystack', async (req, res) => {
-  let event;
+  console.log('📨 Webhook received from PayStack');
   
   try {
-    console.log('📨 Webhook received from PayStack');
-    
-    // Verify signature
+    // Verify signature for security
     const signature = req.headers['x-paystack-signature'];
     if (!signature) {
       console.log('❌ No signature found in headers');
       return res.status(401).json({ success: false, message: 'No signature provided' });
     }
 
+    // Verify the webhook signature
     const computedHash = crypto
       .createHmac('sha512', PAYSTACK_SECRET_KEY)
       .update(req.body)
@@ -47,18 +53,19 @@ router.post('/paystack', async (req, res) => {
     }
 
     // Parse the webhook data
-    event = JSON.parse(req.body.toString());
+    const event = JSON.parse(req.body.toString());
     console.log('✅ Valid PayStack webhook received:', event.event);
 
-    // Immediate response to PayStack
-    res.json({ success: true, message: 'Webhook received successfully' });
+    // IMMEDIATELY respond to Paystack to prevent retries
+    res.status(200).json({ received: true });
 
     // Process webhook asynchronously
     processWebhookEvent(event);
 
   } catch (error) {
     console.error('❌ Webhook processing error:', error.message);
-    res.status(500).json({ success: false, message: 'Webhook processing failed' });
+    // Still respond successfully to prevent Paystack retries
+    res.status(200).json({ received: true });
   }
 });
 
