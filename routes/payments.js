@@ -332,6 +332,63 @@ router.post('/recover-transactions', async (req, res) => {
   }
 });
 
+
+
+router.post('/verify-paystack', async (req, res) => {
+  try {
+    const { reference } = req.body;
+    
+    if (!reference) {
+      return res.status(400).json({
+        success: false,
+        message: 'Reference is required'
+      });
+    }
+
+    console.log('🔍 Proxy: Verifying PayStack transaction:', reference);
+
+    // Call PayStack API from backend (no CORS issues)
+    const paystackResponse = await fetch(`https://api.paystack.co/transaction/verify/${reference}`, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+        'Content-Type': 'application/json',
+      },
+    });
+
+    const data = await paystackResponse.json();
+    
+    console.log('📡 PayStack proxy response:', data);
+
+    if (data.status && data.data && data.data.status === 'success') {
+      // Return the PayStack data through your backend
+      res.json({
+        success: true,
+        status: data.data.status,
+        amount: data.data.amount / 100,
+        reference: data.data.reference,
+        paidAt: data.data.paid_at,
+        message: 'Payment verified successfully via proxy',
+        source: 'paystack_proxy'
+      });
+    } else {
+      res.json({
+        success: false,
+        message: data.message || 'Payment verification failed',
+        status: data.data?.status || 'unknown'
+      });
+    }
+
+  } catch (error) {
+    console.error('❌ PayStack proxy error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Proxy service temporarily unavailable',
+      error: process.env.NODE_ENV === 'production' ? null : error.message
+    });
+  }
+});
+
 // ==================== HELPER FUNCTIONS ====================
 
 // Handle successful payment
