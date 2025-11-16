@@ -173,31 +173,43 @@ function extractUserIdFromChargeData(chargeData) {
          chargeData.customer?.email;
 }
 
-// PRODUCTION: Enhanced sync with main backend
+
+// PRODUCTION: Enhanced sync with main backend - FIXED VERSION
 async function syncWithMainBackendWithRetry(userId, amount, reference, maxRetries = 3) {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       console.log(`🔄 PRODUCTION: Syncing with main backend (Attempt ${attempt}/${maxRetries})`);
       
+      // FIX: Send amount in kobo (as received from PayStack)
+      // Main backend will convert to Naira
+      const syncPayload = {
+        userId: userId,
+        amount: amount, // Keep as kobo, backend will convert
+        reference: reference,
+        description: `Wallet funding via PayStack - Ref: ${reference}`,
+        source: 'paystack_webhook',
+        timestamp: new Date().toISOString()
+      };
+
+      console.log('📦 Sync payload:', syncPayload);
+
       const response = await axios.post(
         `${MAIN_BACKEND_URL}/api/wallet/top-up`,
+        syncPayload,
         {
-          userId: userId,
-          amount: amount,
-          reference: reference,
-          description: `Wallet funding via PayStack - Ref: ${reference}`,
-          source: 'paystack_webhook',
-          timestamp: new Date().toISOString()
-        },
-        {
-          timeout: 10000,
+          timeout: 15000,
           headers: { 
             'Content-Type': 'application/json'
           }
         }
       );
 
-      console.log('✅ PRODUCTION: Main backend sync successful');
+      console.log('✅ PRODUCTION: Main backend sync response:', {
+        status: response.status,
+        success: response.data.success,
+        message: response.data.message,
+        newBalance: response.data.newBalance
+      });
 
       if (response.data.success) {
         return {
@@ -205,6 +217,15 @@ async function syncWithMainBackendWithRetry(userId, amount, reference, maxRetrie
           data: response.data
         };
       } else {
+        // If transaction already processed, consider it success
+        if (response.data.alreadyProcessed) {
+          console.log('ℹ️ Transaction already processed in main backend');
+          return {
+            success: true,
+            data: response.data,
+            alreadyProcessed: true
+          };
+        }
         throw new Error(response.data.message || 'Main backend rejected sync');
       }
     } catch (error) {
@@ -213,6 +234,11 @@ async function syncWithMainBackendWithRetry(userId, amount, reference, maxRetrie
       if (error.response) {
         console.error('Response status:', error.response.status);
         console.error('Response data:', error.response.data);
+        
+        // If it's a client error (4xx), don't retry
+        if (error.response.status >= 400 && error.response.status < 500) {
+          throw error;
+        }
       }
       
       if (attempt === maxRetries) {
@@ -221,11 +247,11 @@ async function syncWithMainBackendWithRetry(userId, amount, reference, maxRetrie
       
       // Wait before retry (exponential backoff)
       const delay = attempt * 2000;
+      console.log(`⏳ Waiting ${delay}ms before retry...`);
       await new Promise(resolve => setTimeout(resolve, delay));
     }
   }
 }
-
 // Handle failed charges
 async function handleFailedCharge(chargeData) {
   try {
