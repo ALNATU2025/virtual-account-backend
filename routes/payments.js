@@ -334,61 +334,258 @@ router.post('/recover-transactions', async (req, res) => {
 
 
 
+// ==================== ENHANCED PAYSTACK PROXY VERIFICATION ====================
 router.post('/verify-paystack', async (req, res) => {
+  let reference = req.body.reference;
+  
+  console.log('🔍 PROXY: Starting PayStack verification for:', reference);
+
   try {
-    const { reference } = req.body;
-    
-    if (!reference) {
+    // Validate reference
+    if (!reference || reference.trim() === '') {
+      console.log('❌ PROXY: No reference provided');
       return res.status(400).json({
         success: false,
-        message: 'Reference is required'
+        message: 'Payment reference is required'
       });
     }
 
-    console.log('🔍 Proxy: Verifying PayStack transaction:', reference);
-
-    // Call PayStack API from backend (no CORS issues)
-    const paystackResponse = await fetch(`https://api.paystack.co/transaction/verify/${reference}`, {
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-        'Content-Type': 'application/json',
-      },
-    });
-
-    const data = await paystackResponse.json();
+    reference = reference.trim();
     
-    console.log('📡 PayStack proxy response:', data);
+    // Step 1: First check if we already have this transaction in our database
+    try {
+      const existingTransaction = await Transaction.findOne({ 
+        reference: reference,
+        status: 'success'
+      });
 
-    if (data.status && data.data && data.data.status === 'success') {
-      // Return the PayStack data through your backend
-      res.json({
-        success: true,
-        status: data.data.status,
-        amount: data.data.amount / 100,
-        reference: data.data.reference,
-        paidAt: data.data.paid_at,
-        message: 'Payment verified successfully via proxy',
-        source: 'paystack_proxy'
+      if (existingTransaction) {
+        console.log('✅ PROXY: Found existing successful transaction in database');
+        return res.json({
+          success: true,
+          status: 'success',
+          amount: existingTransaction.amount,
+          reference: existingTransaction.reference,
+          paidAt: existingTransaction.createdAt,
+          message: 'Payment already verified and processed',
+          source: 'database_cache',
+          cached: true
+        });
+      }
+    } catch (dbError) {
+      console.log('⚠️ PROXY: Database check failed, continuing with PayStack...');
+    }
+
+    // Step 2: Verify with PayStack API
+    console.log('🌐 PROXY: Calling PayStack API for:', reference);
+    
+    const paystackResponse = await axios.get(
+      `https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`,
+      {
+        headers: {
+          'Authorization': `Bearer ${PAYSTACK_SECRET_KEY}`,
+          'Content-Type': 'application/json',
+          'User-Agent': 'VirtualAccountBackend/1.0'
+        },
+        timeout: 15000, // 15 second timeout
+        validateStatus: function (status) {
+          return status < 500; // Resolve only if status code < 500
+        }
+      }
+    );
+
+    console.log('📡 PROXY: PayStack API response status:', paystackResponse.status);
+
+    const responseData = paystackResponse.data;
+
+    // Check if PayStack returned valid data
+    if (!responseData.status) {
+      console.log('❌ PROXY: PayStack API returned error:', responseData.message);
+      return res.status(400).json({
+        success: false,
+        message: responseData.message || 'PayStack verification failed',
+        reference: reference
+      });
+    }
+
+    const transactionData = responseData.data;
+
+    if (!transactionData) {
+      console.log('❌ PROXY: No transaction data from PayStack');
+      return res.status(404).json({
+        success: false,
+        message: 'Transaction not found',
+        reference: reference
+      });
+    }
+
+    console.log('📊 PROXY: Transaction status:', transactionData.status, 'Amount:', transactionData.amount);
+
+    // Handle different transaction statuses
+    if (transactionData.status === 'success') {
+      return await handleProxySuccessfulPayment(transactionData, res);
+    } else if (transactionData.status === 'failed') {
+      return res.json({
+        success: false,
+        status: 'failed',
+        message: 'Payment failed or was declined',
+        reference: reference,
+        gatewayResponse: transactionData.gateway_response
       });
     } else {
-      res.json({
+      // pending, abandoned, etc.
+      return res.json({
         success: false,
-        message: data.message || 'Payment verification failed',
-        status: data.data?.status || 'unknown'
+        status: transactionData.status,
+        message: `Payment is ${transactionData.status}`,
+        reference: reference,
+        retryPossible: true
       });
     }
 
   } catch (error) {
-    console.error('❌ PayStack proxy error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Proxy service temporarily unavailable',
-      error: process.env.NODE_ENV === 'production' ? null : error.message
+    console.error('❌ PROXY: Verification error:', {
+      message: error.message,
+      code: error.code,
+      response: error.response?.data
     });
+
+    // Enhanced error handling
+    if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND') {
+      return res.status(503).json({
+        success: false,
+        message: 'PayStack service temporarily unavailable',
+        reference: reference,
+        retryAfter: 30
+      });
+    } else if (error.response) {
+      // PayStack API returned an error response
+      const status = error.response.status;
+      const paystackError = error.response.data;
+
+      if (status === 404) {
+        return res.status(404).json({
+          success: false,
+          message: 'Transaction not found on PayStack',
+          reference: reference
+        });
+      } else if (status === 401) {
+        return res.status(500).json({
+          success: false,
+          message: 'PayStack authentication failed',
+          reference: reference
+        });
+      } else {
+        return res.status(status).json({
+          success: false,
+          message: paystackError.message || 'PayStack API error',
+          reference: reference
+        });
+      }
+    } else if (error.request) {
+      // Request was made but no response received
+      return res.status(504).json({
+        success: false,
+        message: 'No response from PayStack API',
+        reference: reference,
+        retryPossible: true
+      });
+    } else {
+      // Something else went wrong
+      return res.status(500).json({
+        success: false,
+        message: 'Internal server error during verification',
+        reference: reference,
+        error: process.env.NODE_ENV === 'production' ? null : error.message
+      });
+    }
   }
 });
 
+// ==================== PROXY SUCCESS HANDLER ====================
+async function handleProxySuccessfulPayment(transactionData, res) {
+  try {
+    const amount = transactionData.amount / 100;
+    const reference = transactionData.reference;
+    const userId = extractUserId(transactionData);
+
+    console.log('✅ PROXY: Payment successful:', {
+      reference: reference,
+      amount: amount,
+      userId: userId
+    });
+
+    // Create or update transaction record
+    let transaction = await Transaction.findOne({ reference: reference });
+
+    if (transaction) {
+      if (transaction.status !== 'success') {
+        transaction.status = 'success';
+        transaction.amount = amount;
+        transaction.gatewayResponse = transactionData;
+        await transaction.save();
+        console.log('✅ PROXY: Updated existing transaction to success');
+      }
+    } else {
+      transaction = await Transaction.create({
+        userId: userId,
+        type: 'wallet_funding',
+        amount: amount,
+        reference: reference,
+        status: 'success',
+        gateway: 'paystack',
+        gatewayResponse: transactionData,
+        description: 'Wallet funding via PayStack proxy',
+        metadata: {
+          paystackData: transactionData,
+          source: 'proxy_verification',
+          verifiedAt: new Date()
+        }
+      });
+      console.log('✅ PROXY: Created new transaction record');
+    }
+
+    // Sync with main backend (non-blocking)
+    if (userId) {
+      syncWithMainBackend(userId, amount, reference)
+        .then(syncResult => {
+          console.log('✅ PROXY: Main backend sync completed');
+        })
+        .catch(syncError => {
+          console.error('⚠️ PROXY: Main backend sync failed:', syncError.message);
+          // Don't fail the verification if sync fails
+        });
+    }
+
+    // Return success response immediately
+    res.json({
+      success: true,
+      status: 'success',
+      amount: amount,
+      reference: reference,
+      paidAt: transactionData.paid_at,
+      message: 'Payment verified successfully!',
+      source: 'paystack_proxy',
+      userId: userId,
+      transactionId: transaction._id
+    });
+
+  } catch (processingError) {
+    console.error('❌ PROXY: Error processing successful payment:', processingError);
+    
+    // Even if processing fails, return success if PayStack verified it
+    res.json({
+      success: true,
+      status: 'success',
+      amount: transactionData.amount / 100,
+      reference: transactionData.reference,
+      paidAt: transactionData.paid_at,
+      message: 'Payment verified (processing incomplete)',
+      source: 'paystack_proxy_direct',
+      warning: 'Some post-processing failed'
+    });
+  }
+}
 // ==================== HELPER FUNCTIONS ====================
 
 // Handle successful payment
