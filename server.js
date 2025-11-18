@@ -58,19 +58,19 @@ const UserSchema = new mongoose.Schema({
 const Transaction = mongoose.model('Transaction', TransactionSchema);
 const User = mongoose.model('User', UserSchema);
 
-
+// Import routes (files are available)
 const virtualAccountRoutes = require('./routes/virtualAccount');
 const webhookRoutes = require('./routes/webhooks');
 const paymentRoutes = require('./routes/payments');
 const walletRoutes = require('./routes/wallet');
 
-// Mount routes 
+// Mount routes
 app.use('/api/virtual-accounts', virtualAccountRoutes);
 app.use('/api/webhooks', webhookRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/wallet', walletRoutes);
 
-console.log('✅ Basic routes mounted successfully');
+console.log('✅ All routes mounted successfully');
 
 // PayStack proxy endpoint - Simple version
 app.post('/api/payments/verify-paystack', async (req, res) => {
@@ -448,6 +448,7 @@ mongoose.connect(process.env.MONGODB_URI, {
     console.log(`🌐 CORS: All origins allowed`);
     console.log(`🔗 PayStack Proxy: http://localhost:${PORT}/api/payments/verify-paystack`);
     console.log(`🔗 Enhanced Proxy: http://localhost:${PORT}/api/payments/verify-paystack-enhanced`);
+    console.log(`📁 Route files loaded: virtualAccount, webhooks, payments, wallet`);
   });
 })
 .catch(err => {
