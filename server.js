@@ -45,7 +45,13 @@ app.use('/api/wallet', walletRoutes);
 console.log('✅ All routes mounted successfully');
 
 // PayStack proxy endpoint
+// Add this endpoint to your server.js file
 app.post('/api/payments/verify-paystack', async (req, res) => {
+  // Enable CORS
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  
   try {
     const { reference } = req.body;
     
@@ -56,9 +62,9 @@ app.post('/api/payments/verify-paystack', async (req, res) => {
       });
     }
 
-    console.log('🔍 Proxy: Verifying PayStack transaction:', reference);
+    console.log('🔍 CORS Proxy: Verifying PayStack transaction:', reference);
 
-    // Call PayStack API from backend
+    // Call PayStack API from backend (no CORS issues)
     const paystackResponse = await fetch(`https://api.paystack.co/transaction/verify/${reference}`, {
       method: 'GET',
       headers: {
@@ -69,7 +75,7 @@ app.post('/api/payments/verify-paystack', async (req, res) => {
 
     const data = await paystackResponse.json();
     
-    console.log('📡 PayStack proxy response:', data.status);
+    console.log('📡 CORS Proxy PayStack response:', data.status);
 
     if (data.status && data.data && data.data.status === 'success') {
       res.json({
@@ -78,8 +84,8 @@ app.post('/api/payments/verify-paystack', async (req, res) => {
         amount: data.data.amount / 100,
         reference: data.data.reference,
         paidAt: data.data.paid_at,
-        message: 'Payment verified successfully via proxy',
-        source: 'paystack_proxy'
+        message: 'Payment verified successfully via CORS proxy',
+        source: 'cors_proxy_backend'
       });
     } else {
       res.json({
@@ -90,10 +96,10 @@ app.post('/api/payments/verify-paystack', async (req, res) => {
     }
 
   } catch (error) {
-    console.error('❌ PayStack proxy error:', error);
+    console.error('❌ CORS Proxy error:', error);
     res.status(500).json({
       success: false,
-      message: 'Proxy service temporarily unavailable',
+      message: 'CORS proxy service temporarily unavailable',
       error: process.env.NODE_ENV === 'production' ? null : error.message
     });
   }
@@ -161,3 +167,4 @@ mongoose.connect(process.env.MONGODB_URI, {
   console.error('❌ MongoDB connection failed:', err);
   process.exit(1);
 });
+
