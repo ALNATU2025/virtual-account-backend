@@ -234,7 +234,7 @@ async function handleSuccessfulTransfer(transferData) {
     // Update user balance immediately
     await updateUserBalance(user._id, amountInNaira, transferData.reference);
 
-    // Sync with main backend (non-blocking)
+    // NEW: Sync with main backend using the updated function (non-blocking)
     syncVirtualAccountTransferWithMainBackend(user._id, amountInNaira, transferData.reference)
       .catch(error => {
         console.error('⚠️ Virtual account sync failed:', error.message);
@@ -245,6 +245,58 @@ async function handleSuccessfulTransfer(transferData) {
   } catch (error) {
     console.error('❌ Error processing virtual account transfer:', error.message);
     await storeFailedVirtualAccountTransfer(transferData, error.message);
+  }
+}
+
+// FIXED: Sync virtual account transfer with main backend - UPDATED FUNCTION
+async function syncVirtualAccountTransferWithMainBackend(userId, amount, reference, maxRetries = 3) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`🔄 Syncing virtual account transfer with main backend (Attempt ${attempt}/${maxRetries})`);
+      
+      // Use the CORRECT endpoint and payload for main backend
+      const syncPayload = {
+        userId: userId,
+        amount: amount,
+        type: 'FundWallet', // Use main backend's enum value
+        // Note: main backend uses 'transactionId' not 'reference'
+        transactionId: reference, // Map reference to transactionId
+        details: {
+          description: `Virtual account deposit - Ref: ${reference}`,
+          source: 'virtual_account_webhook',
+          userPreviousBalance: 0, // This will be calculated in main backend
+          userNewBalance: amount  // This will be calculated in main backend
+        }
+      };
+
+      // Use the CORRECT endpoint - /api/fund-wallet
+      const response = await axios.post(
+        `${MAIN_BACKEND_URL}/api/fund-wallet`,
+        syncPayload,
+        {
+          timeout: 15000,
+          headers: { 
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${process.env.MAIN_BACKEND_TOKEN}` // You might need auth
+          }
+        }
+      );
+
+      console.log('✅ Virtual account sync successful:', response.data);
+      return response.data;
+
+    } catch (error) {
+      console.error(`❌ Virtual account sync attempt ${attempt} failed:`, error.message);
+      
+      if (attempt === maxRetries) {
+        console.error('🚨 All virtual account sync attempts failed');
+        // Don't throw - balance is already updated locally
+        return;
+      }
+      
+      // Wait before retry
+      await new Promise(resolve => setTimeout(resolve, attempt * 2000));
+    }
   }
 }
 
@@ -282,22 +334,24 @@ async function updateUserBalance(userId, amount, reference) {
   }
 }
 
-// Sync virtual account transfer with main backend
-async function syncVirtualAccountTransferWithMainBackend(userId, amount, reference, maxRetries = 3) {
+// OLD sync function for regular payments (keep for backward compatibility)
+async function syncVirtualAccountTransferWithMainBackend_OLD(userId, amount, reference, maxRetries = 3) {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       console.log(`🔄 Syncing virtual account transfer with main backend (Attempt ${attempt}/${maxRetries})`);
       
-      // Use the NEW endpoint we just created
       const syncPayload = {
         userId: userId,
         amount: amount,
         reference: reference,
-        description: `Virtual account deposit - ${reference}`
+        description: `Virtual account deposit - Ref: ${reference}`,
+        source: 'virtual_account_webhook',
+        timestamp: new Date().toISOString(),
+        type: 'virtual_account_funding'
       };
 
       const response = await axios.post(
-        `${MAIN_BACKEND_URL}/api/fund-wallet/virtual-account-deposit`,
+        `${MAIN_BACKEND_URL}/api/wallet/virtual-account-topup`,
         syncPayload,
         {
           timeout: 15000,
