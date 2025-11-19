@@ -113,8 +113,7 @@ router.post('/virtual-account-topup', async (req, res) => {
 
         // Check if transaction already exists to prevent double credit
         const existingTransaction = await Transaction.findOne({
-            reference: reference,
-            type: 'wallet_funding'
+            reference: reference
         });
 
         if (existingTransaction) {
@@ -132,16 +131,16 @@ router.post('/virtual-account-topup', async (req, res) => {
         user.walletBalance += parseFloat(amount);
         await user.save();
 
-        // Create transaction record for virtual account transfer
+        // FIXED: Use correct enum values
         const transaction = new Transaction({
             userId: userId,
-            type: 'wallet_funding',
+            type: 'virtual_account_deposit', // Use the new enum value
             amount: parseFloat(amount),
             reference: reference,
-            status: 'completed',
+            status: 'success', // Use 'success' not 'completed'
             description: description || 'Virtual account deposit',
-            previousBalance: oldBalance,
-            newBalance: user.walletBalance,
+            balanceBefore: oldBalance,
+            balanceAfter: user.walletBalance,
             source: source || 'virtual_account_transfer',
             gateway: 'paystack_virtual_account',
             metadata: {
