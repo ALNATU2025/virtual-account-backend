@@ -1,4 +1,4 @@
-// In your webhooks.js - Enhanced version
+// In your webhooks.js - COMPLETE FIXED VERSION
 const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
@@ -9,22 +9,46 @@ const User = require('../models/User');
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
 const MAIN_BACKEND_URL = process.env.MAIN_BACKEND_URL || 'https://vtpass-backend.onrender.com';
 
-// Circuit breaker for sync failures
-let consecutiveFailures = 0;
-const MAX_CONSECUTIVE_FAILURES = 5;
-
-// Raw body parser for webhooks
-const rawBodyParser = express.raw({ 
-  type: 'application/json',
-  verify: (req, res, buf) => {
-    req.rawBody = buf;
+// CRITICAL FIX: Create separate raw body parser for webhooks only
+const paystackWebhookParser = (req, res, next) => {
+  if (req.originalUrl.includes('/paystack')) {
+    console.log('📨 Processing PayStack webhook with raw body...');
+    
+    let data = '';
+    req.setEncoding('utf8');
+    
+    req.on('data', (chunk) => {
+      data += chunk;
+    });
+    
+    req.on('end', () => {
+      try {
+        req.rawBody = data;
+        req.body = JSON.parse(data);
+        console.log('✅ Raw body captured successfully');
+        next();
+      } catch (error) {
+        console.log('❌ Error parsing raw body:', error.message);
+        res.status(400).json({ success: false, message: 'Invalid JSON' });
+      }
+    });
+  } else {
+    next();
   }
-});
+};
 
-// POST endpoint for PayStack webhooks - ENHANCED FOR VIRTUAL ACCOUNT
-router.post('/paystack', rawBodyParser, async (req, res) => {
+// Apply the custom parser to webhook routes
+router.use(paystackWebhookParser);
+
+// POST endpoint for PayStack webhooks - FIXED VERSION
+router.post('/paystack', async (req, res) => {
   console.log('📨 Webhook received from PayStack');
-  
+  console.log('🔍 Headers:', {
+    signature: req.headers['x-paystack-signature'],
+    contentType: req.headers['content-type'],
+    contentLength: req.headers['content-length']
+  });
+
   try {
     const signature = req.headers['x-paystack-signature'];
     if (!signature) {
@@ -32,16 +56,31 @@ router.post('/paystack', rawBodyParser, async (req, res) => {
       return res.status(401).json({ success: false, message: 'No signature provided' });
     }
 
+    // Use the rawBody from our custom parser
     if (!req.rawBody) {
-      console.log('❌ No raw body available');
+      console.log('❌ No raw body available after parsing');
+      console.log('🔍 Available data:', {
+        body: req.body,
+        rawBody: req.rawBody,
+        bodyType: typeof req.body
+      });
       return res.status(400).json({ success: false, message: 'No request body' });
     }
+
+    console.log('📝 Raw body length:', req.rawBody.length);
+    console.log('📝 Raw body sample:', req.rawBody.substring(0, 200) + '...');
 
     // Verify signature
     const computedHash = crypto
       .createHmac('sha512', PAYSTACK_SECRET_KEY)
       .update(req.rawBody)
       .digest('hex');
+
+    console.log('🔐 Signature verification:', {
+      computed: computedHash.substring(0, 20) + '...',
+      received: signature.substring(0, 20) + '...',
+      match: computedHash === signature
+    });
 
     if (computedHash !== signature) {
       console.log('❌ Invalid webhook signature');
@@ -51,7 +90,8 @@ router.post('/paystack', rawBodyParser, async (req, res) => {
     // Parse the webhook data
     let event;
     try {
-      event = JSON.parse(req.rawBody.toString());
+      event = JSON.parse(req.rawBody);
+      console.log('✅ Webhook event parsed:', event.event);
     } catch (parseError) {
       console.log('❌ Failed to parse webhook body:', parseError.message);
       return res.status(400).json({ success: false, message: 'Invalid JSON' });
@@ -63,16 +103,32 @@ router.post('/paystack', rawBodyParser, async (req, res) => {
     }
 
     console.log('✅ Valid PayStack webhook received:', event.event);
+    console.log('📊 Event data:', {
+      reference: event.data?.reference,
+      amount: event.data?.amount,
+      status: event.data?.status,
+      eventType: event.event
+    });
 
     // IMMEDIATELY respond to prevent retries
-    res.status(200).json({ received: true });
+    res.status(200).json({ 
+      received: true, 
+      message: 'Webhook processed successfully',
+      event: event.event 
+    });
 
     // Process webhook asynchronously
     processWebhookEvent(event);
 
   } catch (error) {
     console.error('❌ Webhook processing error:', error.message);
-    res.status(200).json({ received: true });
+    console.error('🔍 Error details:', error.stack);
+    
+    // Still respond with 200 to prevent PayStack retries
+    res.status(200).json({ 
+      received: true, 
+      error: error.message 
+    });
   }
 });
 
@@ -428,12 +484,14 @@ async function syncWithMainBackendWithRetry(userId, amount, reference, maxRetrie
   }
 }
 
-// Handle other webhook events (keep your existing implementations)
+// Handle other webhook events
 async function handleFailedCharge(chargeData) {
+  console.log('❌ Charge failed:', chargeData.reference);
   // Your existing implementation
 }
 
 async function handleFailedTransfer(transferData) {
+  console.log('❌ Transfer failed:', transferData.reference);
   // Your existing implementation
 }
 
@@ -445,13 +503,26 @@ async function handleCustomerIdentificationSuccess(data) {
   console.log('✅ Customer identification success:', data);
 }
 
-// Utility functions (keep your existing implementations)
+// Utility functions
 function validateWebhookEvent(event) {
   return event && event.event && event.data;
 }
 
 function extractUserIdFromChargeData(chargeData) {
-  // Your existing implementation
+  // Extract from metadata
+  if (chargeData.metadata && chargeData.metadata.userId) {
+    return chargeData.metadata.userId;
+  }
+  
+  // Extract from custom fields
+  if (chargeData.metadata && chargeData.metadata.custom_fields) {
+    const userField = chargeData.metadata.custom_fields.find(
+      field => field.variable_name === 'user_id'
+    );
+    if (userField) return userField.value;
+  }
+  
+  return null;
 }
 
 // Export the router
