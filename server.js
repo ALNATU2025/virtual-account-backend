@@ -335,8 +335,7 @@ app.post('/api/payments/verify-paystack-enhanced', [
 });
 
 
-// Virtual Account Transaction Webhook
-// ENHANCED Virtual Account Transaction Webhook - FIXED VERSION
+// In server.js - FIXED Virtual Account Webhook
 app.post('/api/webhooks/virtual-account', async (req, res) => {
   console.log('🔔 Virtual Account Webhook Received:', JSON.stringify(req.body, null, 2));
   
@@ -349,16 +348,14 @@ app.post('/api/webhooks/virtual-account', async (req, res) => {
   try {
     const { event, data } = req.body;
     
-    if (event === 'transfer.success') { // CHANGED from 'charge.success' to 'transfer.success'
+    if (event === 'transfer.success') {
       const { reference, amount, recipient, sender } = data;
       const virtualAccountNumber = recipient?.account_number;
 
       console.log('💳 Virtual Account Transfer Webhook:', {
         reference,
         amount: amount / 100,
-        virtualAccountNumber,
-        sender: sender?.name || 'Unknown',
-        bank: recipient?.bank?.name
+        virtualAccountNumber
       });
 
       if (!virtualAccountNumber) {
@@ -380,11 +377,10 @@ app.post('/api/webhooks/virtual-account', async (req, res) => {
 
       // Check if transaction already exists
       const existingTransaction = await Transaction.findOne({
-        reference: reference,
-        status: 'success'
+        reference: reference
       }).session(session);
 
-      if (existingTransaction) {
+      if (existingTransaction && existingTransaction.status === 'success') {
         console.log('✅ Transaction already processed:', reference);
         await session.abortTransaction();
         return;
@@ -397,27 +393,29 @@ app.post('/api/webhooks/virtual-account', async (req, res) => {
 
       await user.save({ session });
 
-      // Create transaction record
-      const transaction = await Transaction.create([{
-        userId: user._id,
-        type: 'wallet_funding',
+      // FIXED: Use correct enum values for this Transaction model
+      const transactionData = {
+        userId: user._id.toString(),
+        type: 'virtual_account_deposit', // Use the new enum value
         amount: amountInNaira,
-        status: 'success',
+        status: 'success', // This exists in the enum
         reference: reference,
-        gateway: 'paystack_virtual_account',
+        gateway: 'paystack_virtual_account', // This exists in the enum
         description: `Virtual account deposit - ${virtualAccountNumber}`,
+        balanceBefore: balanceBefore,
+        balanceAfter: balanceAfter,
         metadata: {
           source: 'virtual_account_webhook',
           verifiedAt: new Date(),
           virtualAccountNumber: virtualAccountNumber,
-          balanceBefore: balanceBefore,
-          balanceAfter: balanceAfter,
           balanceUpdated: true,
           sender: sender?.name || 'Unknown',
           bank: recipient?.bank?.name,
           webhookData: data
         }
-      }], { session });
+      };
+
+      const transaction = await Transaction.create([transactionData], { session });
 
       await session.commitTransaction();
 
@@ -809,6 +807,7 @@ mongoose.connect(process.env.MONGODB_URI, {
   console.error('❌ MongoDB connection failed:', err);
   process.exit(1);
 });
+
 
 
 
