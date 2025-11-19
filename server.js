@@ -730,6 +730,38 @@ app.use('*', (req, res) => {
   });
 });
 
+// Add this route to your virtual account backend (server.js)
+app.get('/api/payments/user-transactions/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    // Assuming you have a Transaction model in your virtual account backend
+    const transactions = await Transaction.find({ userId })
+      .sort({ createdAt: -1 })
+      .limit(100);
+    
+    res.json({
+      success: true,
+      transactions: transactions.map(tx => ({
+        id: tx._id,
+        reference: tx.reference,
+        amount: tx.amount,
+        type: tx.type,
+        status: tx.status,
+        description: tx.description,
+        createdAt: tx.createdAt,
+        metadata: tx.metadata
+      }))
+    });
+  } catch (error) {
+    console.error('Error fetching user transactions:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch transactions: ' + error.message
+    });
+  }
+});
+
 // Error handling middleware
 app.use((error, req, res, next) => {
   console.error('🚨 Server error:', error);
@@ -762,4 +794,5 @@ mongoose.connect(process.env.MONGODB_URI, {
   console.error('❌ MongoDB connection failed:', err);
   process.exit(1);
 });
+
 
