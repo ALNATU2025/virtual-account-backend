@@ -336,39 +336,46 @@ app.post('/api/payments/verify-paystack-enhanced', [
 
 
 // Virtual Account Transaction Webhook
+// ENHANCED Virtual Account Transaction Webhook - FIXED VERSION
 app.post('/api/webhooks/virtual-account', async (req, res) => {
   console.log('🔔 Virtual Account Webhook Received:', JSON.stringify(req.body, null, 2));
   
+  // IMMEDIATE RESPONSE to prevent PayStack retries
+  res.status(200).json({ success: true, message: 'Webhook received' });
+
   const session = await mongoose.startSession();
   session.startTransaction();
 
   try {
     const { event, data } = req.body;
     
-    if (event === 'charge.success') {
-      const { reference, amount, customer, metadata } = data;
-      const userEmail = customer.email;
-      const virtualAccountNumber = metadata?.virtual_account_number;
+    if (event === 'transfer.success') { // CHANGED from 'charge.success' to 'transfer.success'
+      const { reference, amount, recipient, sender } = data;
+      const virtualAccountNumber = recipient?.account_number;
 
-      console.log('💳 Virtual Account Transaction:', {
+      console.log('💳 Virtual Account Transfer Webhook:', {
         reference,
         amount: amount / 100,
-        userEmail,
-        virtualAccountNumber
+        virtualAccountNumber,
+        sender: sender?.name || 'Unknown',
+        bank: recipient?.bank?.name
       });
 
-      // Find user by email or virtual account number
+      if (!virtualAccountNumber) {
+        console.log('❌ No virtual account number in transfer data');
+        await session.abortTransaction();
+        return;
+      }
+
+      // Find user by virtual account number
       const user = await User.findOne({
-        $or: [
-          { email: userEmail.toLowerCase() },
-          { virtualAccountNumber: virtualAccountNumber }
-        ]
+        virtualAccountNumber: virtualAccountNumber
       }).session(session);
 
       if (!user) {
-        console.log('❌ User not found for virtual account transaction:', { userEmail, virtualAccountNumber });
+        console.log('❌ User not found for virtual account:', virtualAccountNumber);
         await session.abortTransaction();
-        return res.status(404).json({ success: false, message: 'User not found' });
+        return;
       }
 
       // Check if transaction already exists
@@ -380,7 +387,7 @@ app.post('/api/webhooks/virtual-account', async (req, res) => {
       if (existingTransaction) {
         console.log('✅ Transaction already processed:', reference);
         await session.abortTransaction();
-        return res.json({ success: true, message: 'Transaction already processed' });
+        return;
       }
 
       const amountInNaira = amount / 100;
@@ -398,37 +405,45 @@ app.post('/api/webhooks/virtual-account', async (req, res) => {
         status: 'success',
         reference: reference,
         gateway: 'paystack_virtual_account',
-        description: `Wallet funding via Virtual Account - Ref: ${reference}`,
+        description: `Virtual account deposit - ${virtualAccountNumber}`,
         metadata: {
           source: 'virtual_account_webhook',
           verifiedAt: new Date(),
-          customerEmail: userEmail,
           virtualAccountNumber: virtualAccountNumber,
           balanceBefore: balanceBefore,
           balanceAfter: balanceAfter,
           balanceUpdated: true,
+          sender: sender?.name || 'Unknown',
+          bank: recipient?.bank?.name,
           webhookData: data
         }
       }], { session });
 
       await session.commitTransaction();
 
-      console.log('✅ Virtual Account Transaction Processed:', {
+      console.log('✅ Virtual Account Transfer Processed:', {
         reference,
         amount: amountInNaira,
         user: user.email,
-        newBalance: balanceAfter
+        newBalance: balanceAfter,
+        virtualAccount: virtualAccountNumber
       });
 
-      res.json({ success: true, message: 'Virtual account transaction processed' });
+      // Sync with main backend (non-blocking)
+      try {
+        await syncVirtualAccountTransferWithMainBackend(user._id, amountInNaira, reference);
+      } catch (syncError) {
+        console.error('⚠️ Sync failed but balance updated:', syncError.message);
+      }
+
     } else {
+      console.log(`ℹ️ Other webhook event: ${event}`);
       await session.commitTransaction();
-      res.json({ success: true, message: 'Webhook received but no action needed' });
     }
+
   } catch (error) {
     await session.abortTransaction();
     console.error('❌ Virtual Account Webhook Error:', error);
-    res.status(500).json({ success: false, message: 'Webhook processing failed' });
   } finally {
     session.endSession();
   }
@@ -794,5 +809,6 @@ mongoose.connect(process.env.MONGODB_URI, {
   console.error('❌ MongoDB connection failed:', err);
   process.exit(1);
 });
+
 
 
