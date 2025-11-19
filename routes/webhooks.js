@@ -168,15 +168,7 @@ async function processWebhookEvent(event) {
 async function handleSuccessfulTransfer(transferData) {
   try {
     console.log('💳 Processing successful transfer to virtual account:', transferData.reference);
-    console.log('📊 Transfer data:', {
-      reference: transferData.reference,
-      amount: transferData.amount,
-      recipient: transferData.recipient,
-      bank: transferData.recipient?.bank,
-      account_number: transferData.recipient?.account_number,
-      status: transferData.status
-    });
-
+    
     // Convert amount to Naira
     const amountInNaira = transferData.amount / 100;
     
@@ -242,8 +234,11 @@ async function handleSuccessfulTransfer(transferData) {
     // Update user balance immediately
     await updateUserBalance(user._id, amountInNaira, transferData.reference);
 
-    // Sync with main backend
-    await syncVirtualAccountTransferWithMainBackend(user._id, amountInNaira, transferData.reference);
+    // Sync with main backend (non-blocking)
+    syncVirtualAccountTransferWithMainBackend(user._id, amountInNaira, transferData.reference)
+      .catch(error => {
+        console.error('⚠️ Virtual account sync failed:', error.message);
+      });
 
     console.log('🎉 Virtual account transfer completed for user:', user.email);
 
