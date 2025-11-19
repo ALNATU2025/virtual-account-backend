@@ -288,18 +288,16 @@ async function syncVirtualAccountTransferWithMainBackend(userId, amount, referen
     try {
       console.log(`🔄 Syncing virtual account transfer with main backend (Attempt ${attempt}/${maxRetries})`);
       
+      // Use the NEW endpoint we just created
       const syncPayload = {
         userId: userId,
         amount: amount,
         reference: reference,
-        description: `Virtual account deposit - Ref: ${reference}`,
-        source: 'virtual_account_webhook',
-        timestamp: new Date().toISOString(),
-        type: 'virtual_account_funding'
+        description: `Virtual account deposit - ${reference}`
       };
 
       const response = await axios.post(
-        `${MAIN_BACKEND_URL}/api/wallet/virtual-account-topup`,
+        `${MAIN_BACKEND_URL}/api/fund-wallet/virtual-account-deposit`,
         syncPayload,
         {
           timeout: 15000,
