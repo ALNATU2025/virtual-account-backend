@@ -31,32 +31,9 @@ app.options('*', cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// Define Mongoose Models
-const TransactionSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  type: { type: String, required: true, enum: ['credit', 'debit'] },
-  amount: { type: Number, required: true },
-  status: { type: String, required: true, enum: ['pending', 'successful', 'failed'] },
-  description: { type: String, required: true },
-  balanceBefore: { type: Number, required: true },
-  balanceAfter: { type: Number, required: true },
-  reference: { type: String, required: true, unique: true },
-  isCommission: { type: Boolean, default: false },
-  authenticationMethod: { type: String, enum: ['pin', 'biometric', 'none', 'paystack'], default: 'none' },
-  metadata: { type: Object }
-}, { timestamps: true });
-
-const UserSchema = new mongoose.Schema({
-  fullName: { type: String, required: true },
-  email: { type: String, required: true, unique: true },
-  phone: { type: String, required: true },
-  password: { type: String, required: true },
-  walletBalance: { type: Number, default: 0 },
-  isActive: { type: Boolean, default: true },
-}, { timestamps: true });
-
-const Transaction = mongoose.model('Transaction', TransactionSchema);
-const User = mongoose.model('User', UserSchema);
+// Import models from their separate files
+const Transaction = require('./models/Transaction');
+const User = require('./models/User');
 
 // Import routes (files are available)
 const virtualAccountRoutes = require('./routes/virtualAccount');
