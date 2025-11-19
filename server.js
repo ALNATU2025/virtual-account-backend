@@ -138,7 +138,7 @@ app.post('/api/payments/verify-paystack-enhanced', [
     // ✅ CRITICAL: Database-level duplicate check
     const existingTransaction = await Transaction.findOne({
       reference: reference,
-      status: 'successful'
+      status: 'success' // Changed from 'successful' to 'success'
     }).session(session);
 
     if (existingTransaction) {
@@ -198,24 +198,28 @@ app.post('/api/payments/verify-paystack-enhanced', [
         
         await user.save({ session });
 
-        // ✅ Create transaction record with UNIQUE reference
+        // ✅ Create transaction record with UNIQUE reference - USING CORRECT ENUM VALUES
         try {
           const transaction = await Transaction.create([{
             userId: userId,
-            type: 'credit',
+            type: 'wallet_funding', // Changed from 'credit' to 'wallet_funding'
             amount: amount,
-            status: 'successful',
-            description: `Wallet funding via PayStack - Ref: ${reference}`,
-            balanceBefore: balanceBefore,
-            balanceAfter: balanceAfter,
+            status: 'success', // Changed from 'successful' to 'success'
             reference: reference,
-            isCommission: false,
-            authenticationMethod: 'paystack',
+            gateway: 'paystack',
+            description: `Wallet funding via PayStack - Ref: ${reference}`,
             metadata: {
               source: 'paystack_proxy',
               verifiedAt: new Date(),
               customerEmail: data.data.customer?.email,
-              balanceUpdated: true
+              balanceBefore: balanceBefore,
+              balanceAfter: balanceAfter,
+              balanceUpdated: true,
+              paystackData: {
+                paidAt: data.data.paid_at,
+                channel: data.data.channel,
+                currency: data.data.currency
+              }
             }
           }], { session });
 
@@ -338,17 +342,17 @@ app.get('/api/payments/check-reference/:reference', async (req, res) => {
     res.json({
       exists: true,
       userOwnsTransaction: userOwnsTransaction,
-      alreadyProcessed: transaction.status === 'successful',
+      alreadyProcessed: transaction.status === 'success', // Changed from 'successful' to 'success'
       transaction: {
         _id: transaction._id,
         amount: transaction.amount,
         status: transaction.status,
         createdAt: transaction.createdAt,
         userId: transaction.userId,
-        balanceUpdated: transaction.balanceAfter !== transaction.balanceBefore,
+        type: transaction.type,
         description: transaction.description
       },
-      message: transaction.status === 'successful' 
+      message: transaction.status === 'success' 
         ? 'Transaction already processed successfully' 
         : `Transaction is ${transaction.status}`
     });
