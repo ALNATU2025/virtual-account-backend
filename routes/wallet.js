@@ -27,7 +27,7 @@ router.post('/top-up', async (req, res) => {
             });
         }
 
-        // Check if transaction already exists to prevent double credit
+        // Check if transaction already exists
         const existingTransaction = await Transaction.findOne({
             reference: reference,
             type: 'wallet_funding'
@@ -48,17 +48,18 @@ router.post('/top-up', async (req, res) => {
         user.walletBalance += parseFloat(amount);
         await user.save();
 
-        // Create transaction record
+        // FIXED: Use correct enum values
         const transaction = new Transaction({
             userId: userId,
-            type: 'wallet_funding',
+            type: 'wallet_funding', // This exists in the enum
             amount: parseFloat(amount),
             reference: reference,
-            status: 'completed',
+            status: 'success', // This exists in the enum
             description: description || 'Wallet funding',
             previousBalance: oldBalance,
             newBalance: user.walletBalance,
-            source: source || 'paystack_funding'
+            source: source || 'paystack_funding',
+            gateway: 'paystack'
         });
 
         await transaction.save();
