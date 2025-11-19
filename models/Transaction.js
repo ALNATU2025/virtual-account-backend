@@ -15,8 +15,8 @@ const transactionSchema = new mongoose.Schema({
             'transfer', 
             'payment', 
             'withdrawal',
-            'virtual_account_deposit', // ADD THIS
-            'balance_adjustment' // ADD THIS
+            'virtual_account_deposit', // ADDED
+            'balance_adjustment'       // ADDED
         ]
     },
     amount: {
@@ -36,7 +36,7 @@ const transactionSchema = new mongoose.Schema({
             'success', 
             'failed', 
             'cancelled',
-            'completed' // ADD THIS to match your code
+            'completed' // ADDED
         ],
         default: 'pending'
     },
@@ -47,7 +47,7 @@ const transactionSchema = new mongoose.Schema({
             'flutterwave', 
             'monnify', 
             'bank_transfer',
-            'paystack_virtual_account' // ADD THIS
+            'paystack_virtual_account' // ADDED
         ]
     },
     gatewayResponse: {
@@ -56,23 +56,15 @@ const transactionSchema = new mongoose.Schema({
     description: {
         type: String
     },
-    // ADD THESE OPTIONAL BALANCE FIELDS
+
+    // KEEP ONLY THESE — ideal for wallet updates
     balanceBefore: {
-        type: Number,
-        required: false
+        type: Number
     },
     balanceAfter: {
-        type: Number,
-        required: false
+        type: Number
     },
-    previousBalance: {
-        type: Number,
-        required: false
-    },
-    newBalance: {
-        type: Number,
-        required: false
-    },
+
     metadata: {
         type: mongoose.Schema.Types.Mixed
     }
@@ -80,7 +72,7 @@ const transactionSchema = new mongoose.Schema({
     timestamps: true
 });
 
-// Index for better query performance
+// Indexes
 transactionSchema.index({ userId: 1, createdAt: -1 });
 transactionSchema.index({ reference: 1 });
 transactionSchema.index({ status: 1 });
