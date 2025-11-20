@@ -6,6 +6,52 @@ require('dotenv').config();
 
 const app = express();
 
+
+// ==================== SYNC WITH MAIN BACKEND ====================
+const MAIN_BACKEND_URL = process.env.MAIN_BACKEND_URL || 'https://vtpass-backend.onrender.com';
+
+// FIXED & WORKING sync function
+async function syncVirtualAccountTransferWithMainBackend(userId, amountInNaira, reference) {
+  if (!MAIN_BACKEND_URL) {
+    console.error('⚠️ MAIN_BACKEND_URL not set in .env');
+    return;
+  }
+
+  try {
+    console.log('🔄 Syncing virtual account deposit to main backend:', {
+      userId,
+      amountInNaira,
+      reference,
+      url: `${MAIN_BACKEND_URL}/api/wallet/top-up`
+    });
+
+    const response = await fetch(`${MAIN_BACKEND_URL}/api/wallet/top-up`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userId: userId.toString(),
+        amount: amountInNaira,           // already in Naira
+        reference: reference,
+        description: `Virtual account deposit - ${reference}`,
+        source: 'virtual_account_webhook'
+      }),
+      timeout: 15000
+    });
+
+    const result = await response.json();
+
+    if (response.ok && result.success) {
+      console.log('✅ Successfully synced to main backend:', result.newBalance);
+    } else {
+      console.error('❌ Main backend sync failed:', result.message || response.status);
+    }
+  } catch (err) {
+    console.error('❌ Exception during main backend sync:', err.message);
+  }
+}
+
 // ALLOW ALL ORIGINS - Simple CORS fix
 app.use(cors({
   origin: true, // Allow all origins
@@ -845,6 +891,8 @@ app.use((error, req, res, next) => {
   });
 });
 
+
+
 const PORT = process.env.PORT || 3000;
 
 // Connect to MongoDB
@@ -867,6 +915,7 @@ mongoose.connect(process.env.MONGODB_URI, {
   console.error('❌ MongoDB connection failed:', err);
   process.exit(1);
 });
+
 
 
 
