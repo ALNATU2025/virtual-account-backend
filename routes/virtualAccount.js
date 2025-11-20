@@ -3,7 +3,7 @@ const express = require('express');
 const router = express.Router();
 const axios = require('axios');
 const VirtualAccount = require('../models/VirtualAccount');
-const User = require('../models/User');
+const User = require("../models/User");
 
 
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
