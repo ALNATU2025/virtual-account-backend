@@ -7,15 +7,15 @@ const VirtualAccount = require("../models/VirtualAccount");
 const Transaction = require("../models/Transaction");
 const axios = require("axios");
 
-const MAIN_BACKEND_URL = process.env.MAIN_BACKEND_URL; // e.g. https://vtpass-backend.onrender.com
+const MAIN_BACKEND_URL = process.env.MAIN_BACKEND_URL;
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
 
-// 🛑 Duplicate protection memory
+// Proper duplicate protection (reference-based)
 const processedEvents = new Set();
 
 /*
 |--------------------------------------------------------------------------
-| PAYSTACK WEBHOOK FOR VIRTUAL ACCOUNT
+| PAYSTACK WEBHOOK — Virtual Account Deposits
 | Endpoint: /api/webhooks
 |--------------------------------------------------------------------------
 */
@@ -23,101 +23,97 @@ router.post("/", async (req, res) => {
     try {
         console.log("🔔 WEBHOOK RECEIVED:", req.body);
 
-        // 1️⃣ VERIFY PAYSTACK SIGNATURE
+        // 1) Verify Paystack signature
         const hash = crypto
             .createHmac("sha512", PAYSTACK_SECRET_KEY)
             .update(JSON.stringify(req.body))
             .digest("hex");
 
         if (hash !== req.headers["x-paystack-signature"]) {
-            console.log("❌ Invalid signature — webhook ignored");
+            console.log("❌ Invalid Paystack signature");
             return res.status(401).send("Invalid signature");
         }
 
         const event = req.body;
-
-        // 2️⃣ DUPLICATE CHECK
-        if (processedEvents.has(event.event)) {
-            console.log("⚠️ Duplicate event ignored:", event.event);
-            return res.status(200).send("Duplicate ignored");
-        }
-        processedEvents.add(event.event);
-
-        // 3️⃣ PROCESS ONLY SUCCESSFUL TRANSFERS
-        if (event.event !== "transfer.success" && event.event !== "charge.success") {
-            console.log("ℹ️ Not a transfer or charge event — ignored");
-            return res.status(200).send("Ignored");
-        }
-
         const data = event.data;
-        const amountNaira = data.amount / 100; // convert kobo → Naira
-        const reference = data.reference;
-        const senderName = data.customer?.name || "Unknown Sender";
-        const accountNumber = data.metadata?.account_number;
 
-        console.log("📌 Extracted Data:", {
-            accountNumber,
-            amountNaira,
-            reference,
-            senderName,
-        });
+        // 2) Only process actual virtual account credit notifications
+        const supportedEvents = ["charge.success", "transfer.complete"];
+        if (!supportedEvents.includes(event.event)) {
+            console.log("ℹ️ Ignored event:", event.event);
+            return res.status(200).send("ignored");
+        }
+
+        // 3) Extract fields
+        const reference = data.reference;
+        const amountNaira = data.amount / 100;
+
+        // Duplicate protection (reference)
+        if (processedEvents.has(reference)) {
+            console.log("⚠️ DUPLICATE PAYMENT IGNORED:", reference);
+            return res.status(200).send("duplicate");
+        }
+        processedEvents.add(reference);
+
+        // 4) Extract virtual account number
+        const accountNumber =
+            data?.metadata?.account_number ||
+            data?.customer?.bank?.account_number;
 
         if (!accountNumber) {
-            console.log("❌ Missing virtual account number");
+            console.log("❌ No virtual account number provided");
             return res.status(400).send("No account number");
         }
 
-        // 4️⃣ FIND VIRTUAL ACCOUNT OWNER
-        const vAccount = await VirtualAccount.findOne({ accountNumber });
-        if (!vAccount) {
-            console.log("❌ No user found for account:", accountNumber);
-            return res.status(404).send("User not found");
+        // 5) Find virtual account owner
+        const vAcc = await VirtualAccount.findOne({ accountNumber });
+        if (!vAcc) {
+            console.log("❌ Unknown virtual account:", accountNumber);
+            return res.status(404).send("account not found");
         }
 
-        // 5️⃣ GET USER
-        const user = await User.findById(vAccount.userId);
+        const user = await User.findById(vAcc.userId);
         if (!user) {
-            console.log("❌ User record missing for virtual account owner");
-            return res.status(404).send("User not found");
+            console.log("❌ User not found for VA:", vAcc.userId);
+            return res.status(404).send("user not found");
         }
 
-        // 6️⃣ UPDATE USER BALANCE
+        // 6) Update user balance
         user.balance = (user.balance || 0) + amountNaira;
         await user.save();
 
-        console.log(`💰 Balance Updated: ₦${amountNaira} added to user ${user.fullName}`);
+        console.log(`💰 ₦${amountNaira} added → ${user.fullName}`);
 
-        // 7️⃣ RECORD TRANSACTION
-        const transaction = await Transaction.create({
+        // 7) Save transaction
+        await Transaction.create({
             userId: user._id,
             type: "credit",
-            amount: amountNaira,
             status: "successful",
-            description: `Deposit from ${senderName}`,
+            amount: amountNaira,
             reference,
+            description: `Virtual account deposit`,
         });
 
-        console.log("🧾 Transaction Saved:", transaction);
+        console.log("🧾 Transaction saved:", reference);
 
-        // 8️⃣ SYNC WITH MAIN BACKEND (OPTIONAL)
+        // 8) Optional sync with main backend
         if (MAIN_BACKEND_URL) {
             try {
-                console.log("🌍 Syncing with main backend...");
                 await axios.post(`${MAIN_BACKEND_URL}/api/sync/virtual-account`, {
                     userId: user._id,
                     amount: amountNaira,
                     reference,
                 });
-                console.log("✅ Sync complete");
+                console.log("🌍 Sync successful");
             } catch (syncErr) {
-                console.log("⚠️ Sync error:", syncErr.message);
+                console.log("⚠️ Sync error →", syncErr.message);
             }
         }
 
-        return res.status(200).send("Webhook processed");
+        return res.status(200).send("ok");
     } catch (err) {
-        console.log("🔥 Webhook Error:", err);
-        return res.status(500).send("Server error");
+        console.log("🔥 Webhook Fatal Error:", err);
+        return res.status(500).send("server error");
     }
 });
 
