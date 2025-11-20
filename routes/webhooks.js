@@ -21,121 +21,114 @@ const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
  * Endpoint: POST /api/webhooks/virtual-account
  * This handles ONLY successful transfers into dedicated/virtual accounts
  */
+// routes/webhooks.js - FINAL VERSION THAT WORKS WITH REAL PAYSTACK 2025
 router.post("/virtual-account", async (req, res) => {
-    // ========= 1. IMMEDIATE 200 RESPONSE – PayStack will retry if not received fast =========
-    res.status(200).json({ status: "ok" });
+  res.status(200).json({ status: "ok" }); // Immediate ack
 
-    const signature = req.headers["x-paystack-signature"];
-    if (!signature) {
-        console.log("Missing PayStack signature");
-        return;
+  const signature = req.headers["x-paystack-signature"];
+  if (!signature) return console.log("Missing signature");
+
+  const hash = crypto.createHmac("sha512", PAYSTACK_SECRET_KEY)
+    .update(JSON.stringify(req.body))
+    .digest("hex");
+
+  if (hash !== signature) return console.log("Invalid signature");
+
+  const event = req.body;
+  console.log("Virtual Account Webhook:", JSON.stringify(event, null, 2));
+
+  // ACCEPT BOTH EVENTS THAT PAYSTACK SENDS FOR DEDICATED ACCOUNTS
+  const isValidCharge = event.event === "charge.success" &&
+                        event.data.channel === "dedicated_nuban" &&
+                        event.data.status === "success";
+
+  const isValidTransfer = event.event === "transfer.success" &&
+                          event.data.status === "success";
+
+  if (!isValidCharge && !isValidTransfer) {
+    console.log(`Ignored irrelevant event: ${event.event}`);
+    return;
+  }
+
+  const data = event.data;
+  const reference = data.reference;
+  const amountKobo = Number(data.amount || data.amount_kobo || 0);
+  const amountNaira = amountKobo / 100;
+
+  // Extract virtual account number from multiple possible locations
+  const virtualAccountNumber = 
+    data.authorization?.receiver_bank_account_number ||
+    data.metadata?.receiver_account_number ||
+    data.recipient?.account_number ||
+    data.recipient_account_number;
+
+  if (!reference || !virtualAccountNumber) {
+    console.log("Missing reference or virtual account number");
+    return;
+  }
+
+  if (processedReferences.has(reference)) {
+    console.log(`Duplicate ignored: ${reference}`);
+    return;
+  }
+  processedReferences.add(reference);
+
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const user = await User.findOne({ virtualAccountNumber }).session(session);
+    if (!user) {
+      console.log(`No user found for account: ${virtualAccountNumber}`);
+      await session.abortTransaction();
+      return;
     }
 
-    // ========= 2. VERIFY SIGNATURE =========
-    const hash = crypto
-        .createHmac("sha512", PAYSTACK_SECRET_KEY)
-        .update(JSON.stringify(req.body))
-        .digest("hex");
-
-    if (hash !== signature) {
-        console.log("Invalid PayStack signature");
-        return;
+    const existingTx = await Transaction.findOne({ reference }).session(session);
+    if (existingTx) {
+      console.log(`Already processed in DB: ${reference}`);
+      await session.abortTransaction();
+      return;
     }
 
-    const event = req.body;
+    const balanceBefore = user.walletBalance || 0;
+    user.walletBalance = balanceBefore + amountNaira;
+    await user.save({ session });
 
-    // ========= 3. LOG FULL PAYLOAD FOR DEBUGGING =========
-    console.log("Virtual Account Webhook Received:", JSON.stringify(event, null, 2));
+    await Transaction.create([{
+      userId: user._id,
+      type: "virtual_account_deposit",
+      amount: amountNaira,
+      status: "success",
+      reference,
+      gateway: "paystack_virtual_account",
+      description: `Deposit via virtual account ${virtualAccountNumber}`,
+      balanceBefore,
+      balanceAfter: user.walletBalance,
+      metadata: {
+        source: event.event, // charge.success or transfer.success
+        senderName: data.authorization?.sender_name || data.sender_name || "Unknown",
+        virtualAccountNumber,
+        channel: data.channel || "dedicated_nuban"
+      }
+    }], { session });
 
-    // ========= 4. ONLY PROCESS transfer.success (this is the ONLY event for virtual accounts) =========
-    if (event.event !== "transfer.success" || event.data.status !== "success") {
-        console.log(`Ignored event: ${event.event} | status: ${event.data?.status}`);
-        return;
-    }
+    await session.commitTransaction();
+    console.log(`AUTOMATIC CREDIT: ₦${amountNaira} → ${user.email} | Ref: ${reference} | Event: ${event.event}`);
 
-    const data = event.data;
-    const reference = data.reference;
-    const amountKobo = data.amount;
-    const amountNaira = amountKobo / 100;
-
-    const virtualAccountNumber = data.recipient?.account_number;
-
-    if (!reference || !virtualAccountNumber) {
-        console.log("Missing reference or account number");
-        return;
-    }
-
-    // ========= 5. DUPLICATE PROTECTION (idempotency) =========
-    if (processedReferences.has(reference)) {
-        console.log(`Duplicate transfer ignored: ${reference}`);
-        return;
-    }
-    processedReferences.add(reference);
-
-    // ========= 6. FIND USER BY VIRTUAL ACCOUNT NUMBER =========
-    const session = await mongoose.startSession();
-    session.startTransaction();
-
+    // Sync to main backend
     try {
-        const user = await User.findOne({ virtualAccountNumber }).session(session);
-        if (!user) {
-            console.log(`User not found for account: ${virtualAccountNumber}`);
-            await session.abortTransaction();
-            return;
-        }
-
-        // ========= 7. CHECK IF ALREADY PROCESSED IN DB =========
-        const existingTx = await Transaction.findOne({ reference }).session(session);
-        if (existingTx) {
-            console.log(`Already processed in DB: ${reference}`);
-            await session.abortTransaction();
-            return;
-        }
-
-        // ========= 8. CREDIT USER WALLET =========
-        const balanceBefore = user.walletBalance || 0;
-        user.walletBalance = balanceBefore + amountNaira;
-        await user.save({ session });
-
-        // ========= 9. RECORD TRANSACTION =========
-        await Transaction.create([{
-            userId: user._id,
-            type: "virtual_account_deposit",
-            amount: amountNaira,
-            status: "success",
-            reference,
-            gateway: "paystack_virtual_account",
-            description: `Deposit via virtual account ${virtualAccountNumber}`,
-            balanceBefore,
-            balanceAfter: user.walletBalance,
-            metadata: {
-                source: "virtual_account_webhook",
-                senderName: data.sender_name || "Unknown",
-                senderAccount: data.sender_account_number || "N/A",
-                bankName: data.recipient?.bank_name || "Wema Bank",
-                transferCode: data.transfer_code,
-                sessionId: data.session_id,
-            }
-        }], { session });
-
-        await session.commitTransaction();
-        console.log(`SUCCESS: ₦${amountNaira} credited to ${user.email} | Ref: ${reference}`);
-
-        // ========= 10. SYNC TO MAIN APP (vtpass-backend) =========
-        try {
-            await syncVirtualAccountTransferWithMainBackend(user._id, amountNaira, reference);
-        } catch (syncErr) {
-            console.error("Main backend sync failed (will retry on next webhook):", syncErr.message);
-            // Do NOT fail the webhook – money is already in virtual backend
-        }
-
-    } catch (error) {
-        await session.abortTransaction();
-        console.error("Webhook processing error:", error);
-        // Do not return error – PayStack already got 200
-    } finally {
-        session.endSession();
+      await syncVirtualAccountTransferWithMainBackend(user._id, amountNaira, reference);
+    } catch (e) {
+      console.error("Main backend sync failed:", e.message);
     }
+
+  } catch (error) {
+    await session.abortTransaction();
+    console.error("Webhook processing error:", error);
+  } finally {
+    session.endSession();
+  }
 });
 
 module.exports = router;
