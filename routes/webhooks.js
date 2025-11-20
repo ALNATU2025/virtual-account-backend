@@ -22,7 +22,6 @@ const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
  * This handles ONLY successful transfers into dedicated/virtual accounts
  */
 router.post("/virtual-account", async (req, res) => {
-  {
     // ========= 1. IMMEDIATE 200 RESPONSE – PayStack will retry if not received fast =========
     res.status(200).json({ status: "ok" });
 
