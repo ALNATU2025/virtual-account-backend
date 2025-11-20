@@ -202,6 +202,26 @@ router.post('/create-instant-account', async (req, res) => {
 
                 console.log(`✅ Virtual account saved to database: ${virtualAccount.account_number}`);
 
+                // ✅ ADD THIS: Update the user document automatically
+await User.updateOne(
+    { _id: userId },
+    {
+        $set: {
+            virtualAccountNumber: virtualAccount.account_number,
+            virtualAccount: {
+                assigned: true,
+                accountNumber: virtualAccount.account_number,
+                accountName: virtualAccount.account_name,
+                bankName: virtualAccount.bank.name,
+                bankCode: virtualAccount.bank.id.toString(),
+                customerCode: customerCode
+            }
+        }
+    }
+);
+
+console.log(`✅ User document updated with virtual account info: ${userId}`);
+
                 return res.json({
                     success: true,
                     accountNumber: virtualAccount.account_number,
