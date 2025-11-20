@@ -12,40 +12,40 @@ const MAIN_BACKEND_URL = process.env.MAIN_BACKEND_URL || 'https://vtpass-backend
 // Fixed & working sync function
 async function syncVirtualAccountTransferWithMainBackend(userId, amountInNaira, reference) {
   if (!MAIN_BACKEND_URL) {
-    console.error('⚠️ MAIN_BACKEND_URL not set in .env');
+    console.error('MAIN_BACKEND_URL not set');
     return;
   }
 
-  try {
-    console.log('🔄 Syncing virtual account deposit to main backend:', {
-      userId,
-      amountInNaira,
-      reference,
-      url: `${MAIN_BACKEND_URL}/api/wallet/top-up`
-    });
+  // ALWAYS send amount in KOBO (PayStack standard)
+  const payload = {
+    userId: userId.toString(),
+    amount: Math.round(amountInNaira * 100), // ← KOBO
+    reference,
+    description: `Virtual account deposit - ${reference}`,
+    source: 'virtual_account_webhook'
+  };
 
-    const response = await fetch(`${MAIN_BACKEND_URL}/api/wallet/top-up`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        userId: userId.toString(),
-        amount: amountInNaira,
-        reference,
-        description: `Virtual account deposit - ${reference}`,
-        source: 'virtual_account_webhook'
-      }),
-      timeout: 15000
-    });
+  for (let i = 0; i < 3; i++) {
+    try {
+      console.log(`Sync attempt ${i + 1} → ${MAIN_BACKEND_URL}/api/wallet/top-up`, payload);
 
-    const result = await response.json();
+      const res = await fetch(`${MAIN_BACKEND_URL}/api/wallet/top-up`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        timeout: 15000
+      });
 
-    if (response.ok && result.success) {
-      console.log('✅ Successfully synced to main backend:', result.newBalance);
-    } else {
-      console.error('❌ Main backend sync failed:', result.message || response.status);
+      const data = await res.json();
+      if (res.ok && (data.success || data.alreadyProcessed)) {
+        console.log('Sync SUCCESS:', data.newBalance || 'already processed');
+        return;
+      }
+    } catch (e) {
+      console.error(`Sync attempt ${i + 1} failed:`, e.message);
+      if (i === 2) throw e;
+      await new Promise(r => setTimeout(r, 2000 * (i + 1)));
     }
-  } catch (err) {
-    console.error('❌ Exception during main backend sync:', err.message);
   }
 }
 
@@ -405,3 +405,4 @@ mongoose.connect(process.env.MONGODB_URI, { useNewUrlParser: true, useUnifiedTop
     app.listen(PORT, () => { console.log(`🚀 Server running on port ${PORT}`); });
   })
   .catch(err => { console.error('❌ MongoDB connection failed:', err); process.exit(1); });
+
