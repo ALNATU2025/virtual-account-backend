@@ -50,21 +50,20 @@ router.use((req, res, next) => {
   next();
 });
 
-// ==================== PAYMENT INITIALIZATION (FIXED) ====================
+// ==================== FIXED PAYMENT INITIALIZATION ====================
 router.post('/initialize', async (req, res) => {
+  console.log('🚀 INITIALIZE: Received payment request', {
+    userId: req.body.userId,
+    email: req.body.email,
+    amount: req.body.amount,
+    reference: req.body.reference,
+    timestamp: new Date().toISOString()
+  });
+
   try {
     const { userId, email, amount, reference, transactionPin, useBiometric } = req.body;
-    
-    console.log('🚀 Initializing Paystack payment via backend:', { 
-      userId, 
-      email, 
-      amount, 
-      reference,
-      hasPin: !!transactionPin,
-      useBiometric 
-    });
 
-    // Validate required parameters
+    // Basic validation
     if (!email || !amount || !reference) {
       return res.status(400).json({ 
         success: false, 
@@ -79,57 +78,53 @@ router.post('/initialize', async (req, res) => {
       });
     }
 
-    // Validate transaction PIN if provided
-    if (transactionPin) {
-      try {
-        const pinVerification = await verifyTransactionPin(userId, transactionPin);
-        if (!pinVerification.success) {
-          return res.status(400).json({
-            success: false,
-            message: pinVerification.message || 'Invalid transaction PIN'
-          });
-        }
-        console.log('✅ Transaction PIN verified successfully');
-      } catch (pinError) {
-        console.error('❌ PIN verification failed:', pinError.message);
-        return res.status(400).json({
-          success: false,
-          message: 'Transaction PIN verification failed'
-        });
-      }
-    }
+    // Generate proper PayStack reference (like: 100004251121121330145800078218)
+    const paystackReference = generatePaystackReference();
+    console.log('📝 Generated PayStack reference:', paystackReference);
 
-    // Create pending transaction record
-    await Transaction.create({
+    // Skip PIN verification in backend (handle in Flutter)
+    console.log('⏭️ Skipping PIN verification in backend');
+
+    // Create transaction record
+    const transaction = await Transaction.create({
       userId,
       type: 'wallet_funding',
       amount: amount,
-      reference: reference,
+      reference: paystackReference, // Use the proper reference
       status: 'pending',
       gateway: 'paystack',
       description: 'Wallet funding initialization',
       metadata: {
         source: 'payment_initialization',
+        userReference: reference, // Store the original reference
         hasPin: !!transactionPin,
         useBiometric: !!useBiometric,
         initializedAt: new Date()
       }
     });
 
-    // Initialize PayStack payment through backend (no CORS issues)
+    console.log('✅ Transaction record created');
+
+    // Initialize PayStack payment with proper reference
     const paystackPayload = {
       email: email,
       amount: Math.round(amount * 100), // Convert to kobo
-      reference: reference,
-      callback_url: `${process.env.BACKEND_URL || 'https://virtual-account-backend.onrender.com'}/api/payments/verify?redirect=true`,
+      reference: paystackReference, // Use the proper reference
+      callback_url: `https://virtual-account-backend.onrender.com/api/payments/verify?redirect=true&reference=${paystackReference}`,
       metadata: { 
         userId: userId,
+        userReference: reference, // Include original reference
         timestamp: new Date().toISOString(),
-        source: 'virtual_account_backend'
+        source: 'virtual_account_backend',
+        transactionId: transaction._id.toString()
       },
     };
 
-    console.log('📤 Sending request to PayStack...');
+    console.log('📤 Sending to PayStack:', {
+      email: paystackPayload.email,
+      amount: paystackPayload.amount,
+      reference: paystackPayload.reference
+    });
 
     const response = await axios.post(
       'https://api.paystack.co/transaction/initialize',
@@ -138,17 +133,12 @@ router.post('/initialize', async (req, res) => {
         headers: { 
           'Authorization': `Bearer ${PAYSTACK_SECRET_KEY}`,
           'Content-Type': 'application/json',
-          'User-Agent': 'VirtualAccountBackend/1.0'
         },
-        timeout: 30000, // 30 second timeout
+        timeout: 30000,
       }
     );
 
-    console.log('📥 PayStack response received:', {
-      status: response.status,
-      hasData: !!response.data,
-      success: response.data?.status
-    });
+    console.log('📥 PayStack response received');
 
     if (!response.data.status) {
       throw new Error(response.data.message || 'PayStack initialization failed');
@@ -156,56 +146,34 @@ router.post('/initialize', async (req, res) => {
 
     const paystackData = response.data.data;
     
-    console.log('✅ Payment initialized successfully:', {
-      reference: paystackData.reference,
-      authorizationUrl: paystackData.authorization_url ? 'Present' : 'Missing',
-      accessCode: paystackData.access_code ? 'Present' : 'Missing'
-    });
+    console.log('✅ PayStack initialization successful');
 
     // Update transaction with PayStack response
-    await Transaction.findOneAndUpdate(
-      { reference: reference },
-      { 
-        gatewayResponse: paystackData,
-        metadata: {
-          ...paystackPayload.metadata,
-          paystackReference: paystackData.reference,
-          accessCode: paystackData.access_code
-        }
+    await Transaction.findByIdAndUpdate(transaction._id, {
+      gatewayResponse: paystackData,
+      status: 'initialized',
+      metadata: {
+        ...transaction.metadata,
+        paystackReference: paystackData.reference,
+        accessCode: paystackData.access_code,
+        authorizationUrl: paystackData.authorization_url,
+        paystackData: paystackData
       }
-    );
+    });
 
+    // Return success response
     res.json({
       success: true,
       authorizationUrl: paystackData.authorization_url,
-      reference: paystackData.reference,
+      reference: paystackData.reference, // Return the proper reference
       accessCode: paystackData.access_code,
-      message: 'Payment initialized successfully'
+      message: 'Payment initialized successfully',
+      transactionId: transaction._id,
+      userReference: reference // Include original reference for client
     });
 
   } catch (error) {
-    console.error('❌ Initialize error:', {
-      message: error.message,
-      code: error.code,
-      response: error.response?.data,
-      stack: error.stack
-    });
-    
-    // Update transaction status to failed
-    if (req.body.reference) {
-      await Transaction.findOneAndUpdate(
-        { reference: req.body.reference },
-        { 
-          status: 'failed',
-          gatewayResponse: error.response?.data || { error: error.message },
-          metadata: {
-            ...req.body.metadata,
-            error: error.message,
-            failedAt: new Date()
-          }
-        }
-      );
-    }
+    console.error('❌ INITIALIZE ERROR:', error.message);
 
     let errorMessage = 'Payment initialization failed';
     
@@ -224,6 +192,14 @@ router.post('/initialize', async (req, res) => {
     });
   }
 });
+
+// Generate proper PayStack reference (like: 100004251121121330145800078218)
+function generatePaystackReference() {
+  const timestamp = Date.now().toString();
+  const random = Math.random().toString().substring(2, 15);
+  // Format: timestamp + random digits to make it 24 characters
+  return (timestamp + random).substring(0, 24);
+}
 
 // ==================== PAYMENT VERIFICATION ====================
 router.get('/verify', async (req, res) => {
