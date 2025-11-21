@@ -106,22 +106,23 @@ router.post("/virtual-account", async (req, res) => {
     //await user.save({ session });
 
     await Transaction.create([{
-      userId: user._id,
-      type: "virtual_account_deposit",
-      amount: amountNaira,
-      status: "success",
-      reference,
-      gateway: "paystack_virtual_account",
-      description: `Deposit via virtual account ${virtualAccountNumber}`,
-      balanceBefore,
-      balanceAfter: user.walletBalance,
-      metadata: {
-        source: event.event, // charge.success or transfer.success
-        senderName: data.authorization?.sender_name || data.sender_name || "Unknown",
-        virtualAccountNumber,
-        channel: data.channel || "dedicated_nuban"
-      }
-    }], { session });
+  userId: user._id,
+  type: "virtual_account_deposit",
+  amount: amountNaira,
+  status: "success",
+  reference,
+  gateway: "paystack_virtual_account",
+  description: `Deposit via virtual account ${virtualAccountNumber}`,
+  balanceBefore: user.walletBalance,  // ← Use current balance
+  balanceAfter: user.walletBalance + amountNaira,  // ← Simulate what it would be
+  metadata: {
+    source: event.event,
+    senderName: data.authorization?.sender_name || data.sender_name || "Unknown",
+    virtualAccountNumber,
+    channel: data.channel || "dedicated_nuban",
+    note: "Balance credited in main backend only"
+  }
+}], { session });
 
     await session.commitTransaction();
     console.log(`AUTOMATIC CREDIT: ₦${amountNaira} → ${user.email} | Ref: ${reference} | Event: ${event.event}`);
