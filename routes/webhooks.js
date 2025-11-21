@@ -129,7 +129,7 @@ router.post("/virtual-account", async (req, res) => {
 
     // Sync to main backend
     try {
-      await syncVirtualAccountTransferWithMainBackend(user._id, amountNaira * 100, reference);  // ← send kobo
+      await syncVirtualAccountTransferWithMainBackend(user._id, amountNaira, reference);  // ← NAIRA, 
     } catch (e) {
       console.error("Main backend sync failed:", e.message);
     }
