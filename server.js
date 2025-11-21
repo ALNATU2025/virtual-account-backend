@@ -135,7 +135,7 @@ app.post('/api/payments/verify-paystack', async (req, res) => {
   }
 });
 
-// ==================== ENHANCED PAYSTACK VERIFICATION ====================
+// ==================== ENHANCED PAYSTACK VERIFICATION — FINAL REPLAY-PROOF VERSION ====================
 app.post('/api/payments/verify-paystack-enhanced', [
   body('reference').notEmpty().withMessage('Reference is required'),
   body('userId').optional().isMongoId().withMessage('Valid user ID required')
@@ -153,39 +153,55 @@ app.post('/api/payments/verify-paystack-enhanced', [
   try {
     const { reference, userId } = req.body;
 
-    const existingTransaction = await Transaction.findOne({ reference, status: 'success' }).session(session);
+    // === REPLAY ATTACK BLOCK — BLOCKS ALL SUCCESSFUL TRANSACTION FROM ANY SOURCE ===
+    const existingTransaction = await Transaction.findOne({
+      reference,
+      status: { $in: ['success', 'Success', 'Successful', 'completed', 'Completed'] }
+    }).session(session);
+
     if (existingTransaction) {
       await session.abortTransaction();
+      console.log(`REPLAY ATTACK BLOCKED: Reference ${reference} already used (status: ${existingTransaction.status})`);
+
       const currentBalance = userId ? (await User.findById(userId))?.walletBalance || 0 : 0;
+
       return res.json({
         success: false,
-        message: 'This transaction was already verified and processed',
         alreadyProcessed: true,
+        message: "This transaction was already processed automatically when the money arrived.",
         amount: existingTransaction.amount,
         newBalance: currentBalance,
         transactionId: existingTransaction._id,
         databaseProtected: true
       });
     }
+    // === END REPLAY BLOCK ===
 
     const paystackResponse = await fetch(`https://api.paystack.co/transaction/verify/${reference}`, {
       method: 'GET',
-      headers: { 'Authorization': `Bearer ${process.env.PAYSTACK_SECRET_KEY}`, 'Content-Type': 'application/json' },
+      headers: { 
+        'Authorization': `Bearer ${process.env.PAYSTACK_SECRET_KEY}`, 
+        'Content-Type': 'application/json' 
+      },
     });
+
     const data = await paystackResponse.json();
 
     if (data.status && data.data && data.data.status === 'success') {
       const amount = data.data.amount / 100;
+
       if (userId) {
         const user = await User.findById(userId).session(session);
-        if (!user) { await session.abortTransaction(); return res.status(404).json({ success: false, message: 'User not found' }); }
+        if (!user) {
+          await session.abortTransaction();
+          return res.status(404).json({ success: false, message: 'User not found' });
+        }
 
-        const balanceBefore = user.walletBalance;
-        user.walletBalance += amount;
-        const balanceAfter = user.walletBalance;
+        const balanceBefore = user.walletBalance || 0;
+        user.walletBalance = balanceBefore + amount;
         await user.save({ session });
 
-        const transaction = await Transaction.create([{
+        await Transaction.create([{
           userId,
           type: 'wallet_funding',
           amount,
@@ -193,14 +209,13 @@ app.post('/api/payments/verify-paystack-enhanced', [
           reference,
           gateway: 'paystack',
           description: `Wallet funding via PayStack - Ref: ${reference}`,
+          balanceBefore,
+          balanceAfter: user.walletBalance,
           metadata: {
             source: 'paystack_proxy',
             verifiedAt: new Date(),
-            customerEmail: data.data.customer?.email,
-            balanceBefore,
-            balanceAfter,
-            balanceUpdated: true,
-            paystackData: { paidAt: data.data.paid_at, channel: data.data.channel, currency: data.data.currency }
+            customerEmail: data.data.customer?.email || 'N/A',
+            paystackData: { paidAt: data.data.paid_at, channel: data.data.channel }
           }
         }], { session });
 
@@ -208,39 +223,50 @@ app.post('/api/payments/verify-paystack-enhanced', [
 
         return res.json({
           success: true,
-          status: data.data.status,
           amount,
-          reference: data.data.reference,
+          newBalance: user.walletBalance,
+          reference,
           paidAt: data.data.paid_at,
-          newBalance: balanceAfter,
-          message: 'Payment verified successfully with database protection',
-          source: 'enhanced_cors_proxy',
-          transactionId: transaction[0]._id
+          message: 'Payment verified and wallet updated successfully',
+          source: 'enhanced_cors_proxy'
         });
       } else {
         await session.commitTransaction();
         return res.json({
           success: true,
-          status: data.data.status,
           amount,
-          reference: data.data.reference,
+          reference,
           paidAt: data.data.paid_at,
-          message: 'Payment verified successfully (no balance update - user ID required)',
+          message: 'Payment verified (no balance update - user ID required)',
           source: 'cors_proxy_backend',
           needsUserId: true
         });
       }
     } else {
       await session.abortTransaction();
-      return res.json({ success: false, message: data.message || 'Payment verification failed', status: data.data?.status || 'unknown' });
+      return res.json({ 
+        success: false, 
+        message: data.message || 'Payment verification failed',
+        status: data.data?.status || 'failed'
+      });
     }
 
   } catch (error) {
     await session.abortTransaction();
-    if (error.code === 11000 || error.message.includes('duplicate key')) {
-      return res.json({ success: false, message: 'Transaction was already processed', alreadyProcessed: true, databaseConstraint: true });
+    console.error('Enhanced verification error:', error);
+
+    if (error.code === 11000 || error.message.includes('duplicate')) {
+      return res.json({ 
+        success: false, 
+        alreadyProcessed: true, 
+        message: 'Transaction already processed' 
+      });
     }
-    return res.status(500).json({ success: false, message: 'Enhanced verification service temporarily unavailable', error: process.env.NODE_ENV === 'production' ? null : error.message });
+
+    return res.status(500).json({ 
+      success: false, 
+      message: 'Verification service temporarily unavailable' 
+    });
   } finally {
     session.endSession();
   }
@@ -405,4 +431,5 @@ mongoose.connect(process.env.MONGODB_URI, { useNewUrlParser: true, useUnifiedTop
     app.listen(PORT, () => { console.log(`🚀 Server running on port ${PORT}`); });
   })
   .catch(err => { console.error('❌ MongoDB connection failed:', err); process.exit(1); });
+
 
