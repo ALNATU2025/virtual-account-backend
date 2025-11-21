@@ -51,7 +51,7 @@ router.use((req, res, next) => {
 });
 
 // ==================== FIXED PAYMENT INITIALIZATION ====================
-router.post('/initialize', async (req, res) => {
+router.post('/initialize-paystack', async (req, res) => {
   console.log('🚀 INITIALIZE: Received payment request', {
     userId: req.body.userId,
     email: req.body.email,
