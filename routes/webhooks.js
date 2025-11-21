@@ -101,9 +101,9 @@ router.post("/virtual-account", async (req, res) => {
       return;
     }
 
-    const balanceBefore = user.walletBalance || 0;
-    user.walletBalance = balanceBefore + amountNaira;
-    await user.save({ session });
+    //const balanceBefore = user.walletBalance || 0;
+    //user.walletBalance = balanceBefore + amountNaira;
+    //await user.save({ session });
 
     await Transaction.create([{
       userId: user._id,
