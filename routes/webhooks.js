@@ -68,10 +68,20 @@ router.post("/virtual-account", async (req, res) => {
   }
 
   if (processedReferences.has(reference)) {
-    console.log(`Duplicate ignored: ${reference}`);
-    return;
+  console.log(`DUPLICATE WEBHOOK IGNORED: ${reference}`);
+  return res.status(200).json({ message: "Already processed" });
   }
   processedReferences.add(reference);
+
+  // ALSO check database (double safety)
+  const existingInDB = await Transaction.findOne({ reference });
+  if (existingInDB) {
+  console.log(`ALREADY IN DB - IGNORING: ${reference}`);
+  return res.status(200).json({ message: "Already exists in DB" });
+  }
+
+
+
 
   const session = await mongoose.startSession();
   session.startTransaction();
