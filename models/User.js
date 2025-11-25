@@ -156,22 +156,6 @@ const userSchema = mongoose.Schema(
   }
 );
 
-// Hash password before saving
-userSchema.pre('save', async function (next) {
-  // Only hash if the password field is new or has been modified
-  if (this.isModified('password') || this.isNew) {
-    console.log(`DEBUG (User Model Pre-Save): Hashing password for user ${this.email}`);
-    const salt = await bcrypt.genSalt(10);
-    this.password = await bcrypt.hash(this.password, salt);
-  }
-  
-  // Generate referral code if not exists
-  if (!this.referralCode) {
-    this.referralCode = this._id ? `REF${this._id.toString().substring(0, 8).toUpperCase()}` : 'PENDING';
-  }
-  
-  next();
-});
 
 // Hash transaction PIN before saving if modified
 userSchema.pre('save', async function (next) {
