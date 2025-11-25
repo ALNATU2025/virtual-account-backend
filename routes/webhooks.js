@@ -1,4 +1,4 @@
-// routes/webhooks.js - WORKING PRODUCTION VERSION
+// routes/webhooks.js - FIXED VERSION
 const express = require("express");
 const router = express.Router();
 const crypto = require("crypto");
@@ -10,59 +10,80 @@ const { syncVirtualAccountTransferWithMainBackend } = require("../utils/syncVirt
 
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
 
-// ✅ SIMPLE, WORKING WEBHOOK
-router.post("/virtual-account", express.raw({ type: "application/json" }), async (req, res) => {
+// ✅ FIXED: PROPER RAW BODY HANDLING
+router.post("/virtual-account", (req, res, next) => {
   console.log("🎯 WEBHOOK HIT: /virtual-account");
   
-  // ✅ IMMEDIATE RESPONSE - DON'T BLOCK PAYSTACK
-  res.status(200).send("OK");
+  let rawBody = '';
+  
+  // Collect raw body chunks
+  req.on('data', chunk => {
+    rawBody += chunk.toString();
+  });
+  
+  req.on('end', async () => {
+    try {
+      console.log("📦 Raw body received, length:", rawBody.length);
+      console.log("📧 Signature present:", !!req.headers["x-paystack-signature"]);
+      
+      // ✅ IMMEDIATE RESPONSE - DON'T BLOCK PAYSTACK
+      res.status(200).send("OK");
 
-  try {
-    const signature = req.headers["x-paystack-signature"];
-    console.log("📧 Signature present:", !!signature);
+      const signature = req.headers["x-paystack-signature"];
+      
+      if (!signature) {
+        console.log("❌ No signature");
+        return;
+      }
 
-    if (!signature) {
-      console.log("❌ No signature");
-      return;
+      // ✅ VERIFY SIGNATURE WITH RAW BODY STRING
+      const hash = crypto.createHmac("sha512", PAYSTACK_SECRET_KEY)
+                        .update(rawBody)  // Use the raw string
+                        .digest("hex");
+
+      console.log("🔐 Signature check:");
+      console.log("   Received:", signature.substring(0, 30) + "...");
+      console.log("   Computed:", hash.substring(0, 30) + "...");
+
+      if (hash !== signature) {
+        console.log("❌ Signature mismatch - but processing anyway to not lose money");
+        // Continue processing despite signature issue
+      } else {
+        console.log("✅ Signature verified");
+      }
+
+      // ✅ PARSE EVENT
+      const event = JSON.parse(rawBody);
+      console.log("🎯 Event type:", event.event);
+      
+      // Log important event data
+      if (event.data) {
+        console.log("📊 Event data:", {
+          reference: event.data.reference,
+          amount: event.data.amount ? `₦${event.data.amount / 100}` : 'N/A',
+          channel: event.data.channel,
+          customer: event.data.customer?.email || 'N/A'
+        });
+      }
+
+      // ✅ PROCESS PAYMENT
+      if (event.event === "charge.success" && event.data?.status === "success") {
+        console.log("💰 PROCESSING REAL PAYMENT...");
+        await processPayment(event.data);
+      } else {
+        console.log("⏭️ Ignoring event:", event.event);
+      }
+
+    } catch (error) {
+      console.error("💥 Webhook error:", error.message);
+      console.error("Stack:", error.stack);
     }
-
-    // ✅ GET RAW BODY
-    const rawBody = req.body;
-    console.log("📦 Raw body length:", rawBody.length);
-
-    // ✅ VERIFY SIGNATURE
-    const hash = crypto.createHmac("sha512", PAYSTACK_SECRET_KEY)
-                      .update(rawBody)
-                      .digest("hex");
-
-    console.log("🔐 Signature check:");
-    console.log("   Received:", signature.substring(0, 30) + "...");
-    console.log("   Computed:", hash.substring(0, 30) + "...");
-
-    if (hash !== signature) {
-      console.log("❌ Signature mismatch - but processing anyway to not lose money");
-      // Continue processing despite signature issue
-    } else {
-      console.log("✅ Signature verified");
-    }
-
-    // ✅ PARSE EVENT
-    const event = JSON.parse(rawBody.toString());
-    console.log("🎯 Event type:", event.event);
-    console.log("📊 Full event data:", JSON.stringify(event, null, 2));
-
-    // ✅ PROCESS PAYMENT
-    if (event.event === "charge.success" && event.data?.status === "success") {
-      console.log("💰 PROCESSING REAL PAYMENT...");
-      await processPayment(event.data);
-    } else {
-      console.log("⏭️ Ignoring event:", event.event);
-    }
-
-  } catch (error) {
-    console.error("💥 Webhook error:", error.message);
-    console.error("Stack:", error.stack);
-  }
+  });
+  
+  req.on('error', (error) => {
+    console.error("💥 Request error:", error.message);
+    res.status(500).send("Error");
+  });
 });
 
 // ✅ SIMPLE PAYMENT PROCESSING
@@ -75,6 +96,7 @@ async function processPayment(data) {
   console.log(`   Amount: ₦${amountNaira}`);
   console.log(`   Channel: ${data.channel}`);
   console.log(`   Customer: ${data.customer?.email || 'N/A'}`);
+  console.log(`   Virtual Account: ${data.authorization?.receiver_bank_account_number || 'N/A'}`);
 
   const session = await mongoose.startSession();
   
@@ -218,7 +240,7 @@ async function findUser(data, session) {
   return null;
 }
 
-// ✅ TEST ENDPOINT
+// ✅ TEST ENDPOINT (using regular JSON)
 router.post("/test", express.json(), async (req, res) => {
   try {
     const { virtualAccount, email, amount = 1000 } = req.body;
