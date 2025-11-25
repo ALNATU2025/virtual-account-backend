@@ -74,7 +74,8 @@ async function ensureCriticalIndexes() {
     const indexesToDrop = [
       'unique_reference', 
       'email_1',
-      'virtualAccount.accountNumber_1' // Add this to drop the existing virtual account index
+      'virtualAccount.accountNumber_1',
+      'userId_1_createdAt_-1' // Add this to drop the existing performance index
     ];
     
     for (const indexName of indexesToDrop) {
@@ -264,6 +265,7 @@ async function startServer() {
 
 // Start the beast
 startServer();
+
 
 
 
