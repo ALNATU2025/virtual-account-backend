@@ -1,80 +1,91 @@
-// virtual-account-backend/models/Transaction.js - UPDATED
+// models/Transaction.js
 const mongoose = require('mongoose');
 
 const transactionSchema = new mongoose.Schema({
     userId: {
-        type: String,
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
         required: true,
-        index: true
     },
     type: {
         type: String,
-        required: true,
         enum: [
-            'wallet_funding', 
-            'transfer', 
-            'payment', 
-            'withdrawal',
-            'virtual_account_deposit', // ADDED
-            'balance_adjustment'       // ADDED
-        ]
+            'Transfer-Sent', 
+            'Transfer-Received', 
+            'Airtime', 
+            'Data', 
+            'CableTV', 
+            'CashWithdraw', 
+            'FundWallet', 
+            'wallet_funding',
+            'virtual_account_topup',      // ← NEW: For automatic deposits
+            'virtual_account_deposit',    // ← Optional extra name
+            'credit',                     // ← For sync compatibility
+            'debit'
+        ],
+        required: true,
     },
     amount: {
         type: Number,
-        required: true
-    },
-    reference: {
-        type: String,
         required: true,
-        unique: true
     },
     status: {
+    type: String,
+    enum: ['Successful', 'Pending', 'Failed', 'Completed'],  // ← 'Completed' added to enum
+    set: (v) => {
+      if (!v) return 'Pending';
+      const normalized = v.toString().trim().toLowerCase();
+      if (normalized === 'successful' || normalized === 'success') {
+        return 'Successful';
+      }
+      if (normalized === 'completed' || normalized === 'complete') {
+        return 'Completed';
+      }
+      // Capitalize first letter for any other value
+      return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+    },
+    default: 'Pending',
+},
+    transactionId: {
         type: String,
-        required: true,
-        enum: [
-            'pending', 
-            'success', 
-            'failed', 
-            'cancelled',
-            'completed' // ADDED
-        ],
-        default: 'pending'
+        unique: true,
+        sparse: true,        // ← THIS ALLOWS null/undefined while keeping uniqueness
+        default: null        // ← No longer required
+        // You can auto-generate it in the controller if you want
     },
-    gateway: {
+    reference: {             // ← ADD THIS: PayStack reference (very useful!)
         type: String,
-        enum: [
-            'paystack', 
-            'flutterwave', 
-            'monnify', 
-            'bank_transfer',
-            'paystack_virtual_account' // ADDED
-        ]
+        unique: true,
+        sparse: true
     },
-    gatewayResponse: {
-        type: mongoose.Schema.Types.Mixed
+    description: {           // ← Optional but nice to have
+        type: String,
+        default: ''
     },
-    description: {
-        type: String
-    },
-
-    // KEEP ONLY THESE — ideal for wallet updates
     balanceBefore: {
-        type: Number
+    type: Number,
+    default: 0
     },
     balanceAfter: {
-        type: Number
+    type: Number,
+    default: 0
     },
+    
+    details: {
+        type: mongoose.Schema.Types.Mixed,
+        default: {}
+    },
+}, { timestamps: true });
 
-    metadata: {
-        type: mongoose.Schema.Types.Mixed
+// Optional: Auto-generate transactionId if not provided
+transactionSchema.pre('save', function(next) {
+    if (!this.transactionId) {
+        this.transactionId = `TXN_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`.toUpperCase();
     }
-}, {
-    timestamps: true
+    if (this.reference && !this.transactionId) {
+        this.transactionId = this.reference; // fallback
+    }
+    next();
 });
 
-// Indexes
-transactionSchema.index({ userId: 1, createdAt: -1 });
-transactionSchema.index({ reference: 1 });
-transactionSchema.index({ status: 1 });
-
-module.exports = mongoose.model('Transaction', transactionSchema);
+module.exports = mongoose.models.Transaction || mongoose.model('Transaction', transactionSchema);
