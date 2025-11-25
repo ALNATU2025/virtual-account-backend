@@ -15,7 +15,8 @@ async function ensureCriticalIndexes() {
     console.log('Ensuring critical indexes for zero double-funding...');
 
     const collection = mongoose.connection.collection('transactions');
-    
+    const usersCollection = mongoose.connection.collection('users');
+
     // Step 1: Find and fix ALL duplicate references (not just nulls)
     console.log('Scanning for duplicate references...');
     
@@ -69,15 +70,26 @@ async function ensureCriticalIndexes() {
       console.log(`Cleaned up ${nullResult.modifiedCount} transactions with null references`);
     }
 
-    // Step 4: Drop existing index if it exists (to start fresh)
-    try {
-      await collection.dropIndex('unique_reference');
-      console.log('Dropped existing unique_reference index');
-    } catch (e) {
-      console.log('No existing unique_reference index to drop');
+    // Step 4: Drop existing indexes if they exist (to start fresh)
+    const indexesToDrop = ['unique_reference', 'email_1'];
+    
+    for (const indexName of indexesToDrop) {
+      try {
+        await collection.dropIndex(indexName);
+        console.log(`Dropped existing ${indexName} index from transactions`);
+      } catch (e) {
+        // Index might not exist, that's fine
+      }
+      
+      try {
+        await usersCollection.dropIndex(indexName);
+        console.log(`Dropped existing ${indexName} index from users`);
+      } catch (e) {
+        // Index might not exist, that's fine
+      }
     }
 
-    // Step 5: Create the critical indexes
+    // Step 5: Create the critical indexes with explicit names
     await Promise.all([
       // This index is what makes double funding IMPOSSIBLE
       collection.createIndex(
@@ -85,26 +97,26 @@ async function ensureCriticalIndexes() {
         { 
           unique: true, 
           background: true, 
-          name: 'unique_reference'
+          name: 'unique_reference_transactions'
         }
       ),
 
       // Virtual account lookup
-      mongoose.connection.collection('users').createIndex(
+      usersCollection.createIndex(
         { "virtualAccount.accountNumber": 1 },
-        { unique: true, sparse: true, background: true }
+        { unique: true, sparse: true, background: true, name: 'virtual_account_number_unique' }
       ),
 
       // Fast user lookup by email
-      mongoose.connection.collection('users').createIndex(
+      usersCollection.createIndex(
         { email: 1 },
-        { background: true }
+        { background: true, name: 'email_lookup' }
       ),
 
       // Performance
       collection.createIndex(
         { userId: 1, createdAt: -1 },
-        { background: true }
+        { background: true, name: 'user_transactions_performance' }
       )
     ]);
 
@@ -113,7 +125,7 @@ async function ensureCriticalIndexes() {
 
   } catch (err) {
     console.error('Failed to create indexes:', err.message);
-    // Don't crash — indexes might already exist
+    // Don't crash — indexes might already exist in different forms
   }
 }
 // ==================== SYNC WITH MAIN BACKEND ====================
@@ -186,6 +198,31 @@ app.use('/api/webhooks', webhookRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/wallet', walletRoutes);
 
+
+// ==================== DEBUG/VERIFICATION ROUTES ====================
+// Add this route to verify indexes are working
+app.get('/api/debug/indexes', async (req, res) => {
+  try {
+    const transactionsIndexes = await mongoose.connection.collection('transactions').indexes();
+    const usersIndexes = await mongoose.connection.collection('users').indexes();
+    
+    res.json({
+      transactions: transactionsIndexes.map(idx => ({
+        name: idx.name,
+        key: idx.key,
+        unique: idx.unique || false
+      })),
+      users: usersIndexes.map(idx => ({
+        name: idx.name,
+        key: idx.key,
+        unique: idx.unique || false
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ==================== ALL YOUR EXISTING ENDPOINTS (unchanged) ====================
 // Keep everything you already have below — CORS proxy, enhanced verify, etc.
 // I'm only showing the critical part above — paste the rest exactly as you have it
@@ -222,5 +259,6 @@ async function startServer() {
 
 // Start the beast
 startServer();
+
 
 
