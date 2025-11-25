@@ -1,246 +1,230 @@
-// routes/webhooks.js - PRODUCTION VERSION
+// routes/webhooks.js - PRODUCTION-READY PAYSTACK WEBHOOK (2025 BEST PRACTICES)
 const express = require("express");
 const router = express.Router();
 const crypto = require("crypto");
 const mongoose = require("mongoose");
 
+// Models
 const User = require("../models/User");
 const Transaction = require("../models/Transaction");
+
+// Utils
 const { syncVirtualAccountTransferWithMainBackend } = require("../utils/syncVirtualAccount");
 
+// Config
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
+if (!PAYSTACK_SECRET_KEY) {
+  throw new Error("PAYSTACK_SECRET_KEY is not set in environment variables");
+}
 
-// ✅ PRODUCTION WEBHOOK - REAL PAYSTACK INTEGRATION
-router.post("/virtual-account", express.raw({ type: 'application/json' }), async (req, res) => {
-  console.log("💰 PAYSTACK PRODUCTION WEBHOOK RECEIVED");
-  
-  // Store the raw body for signature verification
-  const rawBody = req.body.toString('utf8');
-  
-  try {
+// Paystack IPs (2025 updated list - always verify: https://paystack.com/docs/#webhooks-security)
+const PAYSTACK_IPS = [
+  "52.31.139.75",
+  "52.49.173.169",
+  "52.214.14.220",
+  "52.30.107.86",
+  "52.51.68.183",
+  "52.214.218.189",
+];
+
+// In-memory set to track processed event IDs (use an external store like Redis in high-traffic apps
+const processedEventIds = new Set();
+
+// ================ MAIN WEBHOOK ENDPOINT ================
+router.post(
+  "/paystack",
+  express.raw({ type: "application/json" }), // CRITICAL: Must come BEFORE any express.json()
+  async (req, res) => {
     const signature = req.headers["x-paystack-signature"];
+    const ip = req.ip || req.connection.remoteAddress;
+
+    console.log("Paystack webhook received", {
+      ip,
+      eventId: req.headers["x-paystack-event-id"],
+      timestamp: new Date().toISOString(),
+    });
+
+    // === 1. IP Whitelisting (Recommended by Paystack) ===
+    if (!PAYSTACK_IPS.includes(ip.replace("::ffff:", ""))) {
+      console.warn("Unauthorized webhook IP:", ip);
+      return res.status(401).send("Unauthorized IP");
+    }
+
+    // === 2. Verify Signature Verification ===
     if (!signature) {
-      console.log("❌ Missing PayStack signature");
+      console.warn("Missing x-paystack-signature header");
       return res.status(400).send("Missing signature");
     }
 
-    // ✅ REAL SIGNATURE VERIFICATION (Production)
-    const hash = crypto.createHmac("sha512", PAYSTACK_SECRET_KEY).update(rawBody).digest("hex");
-    
+    const hash = crypto
+      .createHmac("sha512", PAYSTACK_SECRET_KEY)
+      .update(req.body) // req.body is Buffer thanks to express.raw()
+      .digest("hex");
+
     if (hash !== signature) {
-      console.log("❌ Invalid PayStack signature");
-      console.log("Expected:", hash.substring(0, 20) + "...");
-      console.log("Received:", signature.substring(0, 20) + "...");
+      console.error("Invalid Paystack signature", { received: signature, computed: hash });
       return res.status(400).send("Invalid signature");
     }
 
-    // ✅ Parse the JSON after signature verification
-    const event = JSON.parse(rawBody);
-    console.log("🔔 PayStack Event:", event.event);
-
-    // ✅ PROCESS REAL PAYSTACK EVENTS
-    if (event.event === "charge.success" && event.data?.status === "success") {
-      console.log("🎯 Processing REAL payment from PayStack...");
-      await processRealPayment(event.data);
-    } else {
-      console.log("⏭️ Ignoring event:", event.event);
+    // === 3. Parse Event Safely ===
+    let event;
+    try {
+      event = JSON.parse(req.body.toString("utf8"));
+    } catch (err) {
+      console.error("Invalid JSON payload from Paystack");
+      return res.status(400).send("Invalid JSON");
     }
 
-    // ✅ ALWAYS RETURN 200 TO PAYSTACK
-    res.status(200).send("OK");
+    // === 4. Prevent Duplicate Processing (Idempotency) ===
+    const eventId = event.id || event.event_id;
+    if (!eventId) {
+      console.warn("Event missing ID", event.event);
+      return res.status(400).send("Missing event ID");
+    }
 
-  } catch (error) {
-    console.error("💥 Webhook error:", error.message);
-    // STILL return 200 to PayStack even on errors
-    res.status(200).send("OK");
+    if (processedEventIds.has(eventId)) {
+      console.log(`Duplicate event ignored: ${eventId}`);
+      return res.status(200).send("OK");
+    }
+
+    // Only process relevant events
+    if (event.event === "charge.success") {
+      // Queue long-running task
+      handleChargeSuccess(event.data).catch((err) => {
+        console.error("Unhandled error in handleChargeSuccess:", err);
+      });
+    }
+    // You can add more events later: transfer.success, etc.
+
+    // Mark as processed BEFORE returning 200 (prevents retry loops)
+    processedEventIds.add(eventId);
+
+    // Clean up old IDs occasionally (optional)
+    if (processedEventIds.size > 10000) {
+      // Keep last 5000 only
+      const entries = Array.from(processedEventIds).slice(-5000);
+      processedEventIds.clear();
+      entries.forEach((id) => processedEventIds.add(id));
+    }
+
+    // === 5. Acknowledge immediately ===
+    return res.status(200).send("OK");
   }
-});
+);
 
-async function processRealPayment(data) {
+// ================ EVENT HANDLERS ================
+
+async function handleChargeSuccess(data) {
   const reference = data.reference;
-  const amountNaira = Number(data.amount) / 100;
-  
-  console.log(`\n💰 PROCESSING REAL PAYMENT FROM PAYSTACK:`);
-  console.log(`📦 Reference: ${reference}`);
-  console.log(`💵 Amount: ₦${amountNaira}`);
-  console.log(`📱 Channel: ${data.channel}`);
-  console.log(`👤 Customer: ${data.customer?.email || 'N/A'}`);
+  const amountKobo = Number(data.amount);
+  const amountNaira = amountKobo / 100;
+
+  // Only process dedicated virtual account payments
+  if (data.channel !== "dedicated_nuban") {
+    console.log(`Ignoring non-virtual-account charge: ${reference} (${data.channel})`);
+    return;
+  }
+
+  if (data.status !== "success") {
+    console.log(`Ignoring non-success charge: ${reference}`);
+    return;
+  }
 
   const session = await mongoose.startSession();
-  
+
   try {
     await session.withTransaction(async () => {
-      // ✅ CHECK FOR DUPLICATES
-      const existing = await Transaction.findOne({ reference }).session(session);
-      if (existing) {
-        console.log(`⏭️ Already processed: ${reference}`);
+      // Prevent double processing
+      const existingTx = await Transaction.findOne({ reference }).session(session);
+      if (existingTx) {
+        console.log(`Already processed: ${reference}`);
         return;
       }
 
-      // ✅ FIND USER FOR REAL PAYMENT
-      const user = await findUserForRealPayment(data, session);
+      const user = await findUserByVirtualAccount(data, session);
       if (!user) {
-        console.log("❌ USER NOT FOUND - Real payment cannot be credited");
-        console.log("🔍 PayStack data received:", {
-          channel: data.channel,
-          virtualAccount: data.authorization?.receiver_bank_account_number,
-          customerEmail: data.customer?.email,
-          metadata: data.metadata
+        console.error("User not found for virtual account payment", {
+          reference,
+          accountNumber: data.authorization?.receiver_bank_account_number,
+          email: data.customer?.email,
+          metadataUserId: data.metadata?.userId,
         });
         return;
       }
 
-      console.log(`✅ USER FOUND: ${user.email}`);
-      console.log(`📊 Balance Before: ₦${user.walletBalance}`);
-
-      // ✅ CREDIT WALLET
       const balanceBefore = user.walletBalance;
       user.walletBalance += amountNaira;
       await user.save({ session });
 
-      // ✅ CREATE TRANSACTION
-      const transactionData = {
-        userId: user._id,
-        type: "virtual_account_topup",
-        amount: amountNaira,
-        status: "Successful",
-        reference: reference,
-        description: `Virtual account deposit via ${data.channel || 'PayStack'}`,
-        balanceBefore: balanceBefore,
-        balanceAfter: user.walletBalance,
-        gateway: "paystack",
-        details: {
-          source: "paystack_webhook",
-          channel: data.channel,
-          paymentMethod: data.authorization?.channel || data.authorization?.card_type || data.channel,
-          customerEmail: data.customer?.email || user.email,
-          bank: data.authorization?.bank || data.authorization?.receiver_bank?.name || "N/A",
-          virtualAccount: data.authorization?.receiver_bank_account_number || "N/A",
-          paidAt: data.paid_at || new Date().toISOString()
-        }
-      };
+      await Transaction.create(
+        [
+          {
+            userId: user._id,
+            type: "virtual_account_topup",
+            amount: amountNaira,
+            status: "Successful",
+            reference,
+            description: "Virtual account deposit via Paystack",
+            balanceBefore,
+            balanceAfter: user.walletBalance,
+            gateway: "paystack",
+            details: {
+              source: "paystack_webhook",
+              channel: data.channel,
+              paymentMethod: data.authorization?.channel || "dedicated_nuban",
+              customerEmail: data.customer?.email || user.email,
+              bank: data.authorization?.bank || "N/A",
+              virtualAccount: data.authorization?.receiver_bank_account_number,
+              paidAt: data.paid_at || new Date(),
+              eventId: data.id,
+            },
+          },
+        ],
+        { session }
+      );
 
-      await Transaction.create([transactionData], { session });
+      console.log(`PAYMENT CREDITED: ₦${amountNaira} → ${user.email} | Ref: ${reference}`);
 
-      console.log(`🎉 REAL PAYMENT SUCCESS!`);
-      console.log(`✅ Credited: ₦${amountNaira} to ${user.email}`);
-      console.log(`💰 New Balance: ₦${user.walletBalance}`);
-
-      // ✅ SYNC TO MAIN BACKEND
-      try {
-        await syncVirtualAccountTransferWithMainBackend(user._id, amountNaira, reference);
-        console.log("✅ Main backend sync completed");
-      } catch (syncError) {
-        console.error("⚠️ Sync failed:", syncError.message);
-      }
+      // Sync to main backend (fire and forget)
+      syncVirtualAccountTransferWithMainBackend(user._id, amountNaira, reference).catch((err) =>
+        console.error("Main backend sync failed:", err.message)
+      );
     });
-
   } catch (error) {
-    console.error("💥 Payment processing failed:", error.message);
+    console.error("Transaction failed for reference:", reference, error);
+    // Do NOT throw — we already returned 200 OK to Paystack
   } finally {
-    session.endSession();
+    await session.endSession();
   }
 }
 
-// ✅ USER FINDING FOR REAL PAYSTACK PAYMENTS
-async function findUserForRealPayment(data, session) {
-  const channel = data.channel;
-  
-  console.log("🔍 Searching for user with real PayStack data...");
+async function findUserByVirtualAccount(data, session) {
+  const accountNumber = data.authorization?.receiver_bank_account_number;
 
-  // METHOD 1: Virtual Account Payments
-  if (channel === "dedicated_nuban") {
-    const accountNumber = data.authorization?.receiver_bank_account_number;
-    console.log(`🔍 Virtual account search: ${accountNumber}`);
-    
-    if (accountNumber) {
-      const user = await User.findOne({ 
-        "virtualAccount.accountNumber": accountNumber 
-      }).session(session);
-      if (user) {
-        console.log(`✅ Found via virtual account: ${accountNumber}`);
-        return user;
-      }
-    }
+  if (accountNumber) {
+    const user = await User.findOne({
+      "virtualAccount.accountNumber": accountNumber,
+    }).session(session);
+
+    if (user) return user;
   }
 
-  // METHOD 2: Customer Email
-  if (data.customer?.email) {
-    const email = data.customer.email.toLowerCase().trim();
-    console.log(`🔍 Email search: ${email}`);
-    
-    const user = await User.findOne({ email }).session(session);
-    if (user) {
-      console.log(`✅ Found via email: ${email}`);
-      return user;
-    }
-  }
-
-  // METHOD 3: Metadata
+  // Fallback: metadata.userId (if you pass it during initialization)
   if (data.metadata?.userId) {
-    console.log(`🔍 UserId search: ${data.metadata.userId}`);
-    const user = await User.findById(data.metadata.userId).session(session);
-    if (user) {
-      console.log(`✅ Found via userId: ${data.metadata.userId}`);
-      return user;
-    }
+    return await User.findById(data.metadata.userId).session(session);
   }
 
-  // METHOD 4: Custom Fields
-  if (data.metadata?.custom_fields) {
-    console.log("🔍 Checking custom fields...");
-    for (let field of data.metadata.custom_fields) {
-      if (field.variable_name === "account_number" || field.variable_name === "virtual_account") {
-        const user = await User.findOne({ 
-          "virtualAccount.accountNumber": field.value 
-        }).session(session);
-        if (user) return user;
-      }
-    }
+  // Fallback: customer email
+  if (data.customer?.email) {
+    return await User.findOne({ email: data.customer.email.toLowerCase() }).session(session);
   }
 
-  console.log("❌ User not found with any method");
   return null;
 }
 
-// ✅ PRODUCTION HEALTH CHECK
-router.get("/health", (req, res) => {
-  res.json({
-    status: "active",
-    service: "paystack-webhook",
-    environment: process.env.NODE_ENV,
-    timestamp: new Date().toISOString()
-  });
-});
-
-// ✅ CHECK REAL TRANSACTIONS
-router.get("/transactions/:reference", async (req, res) => {
-  try {
-    const { reference } = req.params;
-    const transaction = await Transaction.findOne({ reference });
-    
-    if (!transaction) {
-      return res.status(404).json({ 
-        exists: false, 
-        message: "Transaction not found" 
-      });
-    }
-
-    res.json({
-      exists: true,
-      transaction: {
-        reference: transaction.reference,
-        type: transaction.type,
-        status: transaction.status,
-        amount: transaction.amount,
-        userId: transaction.userId,
-        description: transaction.description,
-        createdAt: transaction.createdAt
-      }
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+// ================ HEALTH CHECK (Optional) ================
+router.get("/paystack/health", (req, res) => {
+  res.status(200).json({ status: "ok", time: new Date().toISOString() });
 });
 
 module.exports = router;
