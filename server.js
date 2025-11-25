@@ -71,7 +71,11 @@ async function ensureCriticalIndexes() {
     }
 
     // Step 4: Drop existing indexes if they exist (to start fresh)
-    const indexesToDrop = ['unique_reference', 'email_1'];
+    const indexesToDrop = [
+      'unique_reference', 
+      'email_1',
+      'virtualAccount.accountNumber_1' // Add this to drop the existing virtual account index
+    ];
     
     for (const indexName of indexesToDrop) {
       try {
@@ -128,6 +132,7 @@ async function ensureCriticalIndexes() {
     // Don't crash — indexes might already exist in different forms
   }
 }
+
 // ==================== SYNC WITH MAIN BACKEND ====================
 const MAIN_BACKEND_URL = process.env.MAIN_BACKEND_URL || 'https://vtpass-backend.onrender.com';
 
@@ -259,6 +264,7 @@ async function startServer() {
 
 // Start the beast
 startServer();
+
 
 
 
