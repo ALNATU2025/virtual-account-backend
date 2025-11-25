@@ -1,4 +1,4 @@
-// routes/webhooks.js - FIXED VERSION
+// routes/webhooks.js - COMPLETE WORKING VERSION
 const express = require("express");
 const router = express.Router();
 const crypto = require("crypto");
@@ -10,7 +10,7 @@ const { syncVirtualAccountTransferWithMainBackend } = require("../utils/syncVirt
 
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
 
-// ✅ FIXED: PROPER RAW BODY HANDLING
+// ✅ WORKING WEBHOOK WITH SYNC
 router.post("/virtual-account", (req, res, next) => {
   console.log("🎯 WEBHOOK HIT: /virtual-account");
   
@@ -23,8 +23,7 @@ router.post("/virtual-account", (req, res, next) => {
   
   req.on('end', async () => {
     try {
-      console.log("📦 Raw body received, length:", rawBody.length);
-      console.log("📧 Signature present:", !!req.headers["x-paystack-signature"]);
+      console.log("📦 Raw body length:", rawBody.length);
       
       // ✅ IMMEDIATE RESPONSE - DON'T BLOCK PAYSTACK
       res.status(200).send("OK");
@@ -36,47 +35,43 @@ router.post("/virtual-account", (req, res, next) => {
         return;
       }
 
-      // ✅ VERIFY SIGNATURE WITH RAW BODY STRING
+      // ✅ VERIFY SIGNATURE
       const hash = crypto.createHmac("sha512", PAYSTACK_SECRET_KEY)
-                        .update(rawBody)  // Use the raw string
+                        .update(rawBody)
                         .digest("hex");
 
-      console.log("🔐 Signature check:");
-      console.log("   Received:", signature.substring(0, 30) + "...");
-      console.log("   Computed:", hash.substring(0, 30) + "...");
+      console.log("🔐 Signature:", hash === signature ? "✅ VALID" : "❌ INVALID");
 
       if (hash !== signature) {
-        console.log("❌ Signature mismatch - but processing anyway to not lose money");
-        // Continue processing despite signature issue
-      } else {
-        console.log("✅ Signature verified");
+        console.log("⚠️  Signature mismatch - processing anyway");
       }
 
       // ✅ PARSE EVENT
       const event = JSON.parse(rawBody);
-      console.log("🎯 Event type:", event.event);
+      console.log("🎯 Event:", event.event);
       
-      // Log important event data
+      // Log important data
       if (event.data) {
-        console.log("📊 Event data:", {
+        console.log("📊 Payment Data:", {
           reference: event.data.reference,
           amount: event.data.amount ? `₦${event.data.amount / 100}` : 'N/A',
           channel: event.data.channel,
-          customer: event.data.customer?.email || 'N/A'
+          status: event.data.status,
+          customer: event.data.customer?.email || 'N/A',
+          virtualAccount: event.data.authorization?.receiver_bank_account_number || 'N/A'
         });
       }
 
       // ✅ PROCESS PAYMENT
       if (event.event === "charge.success" && event.data?.status === "success") {
-        console.log("💰 PROCESSING REAL PAYMENT...");
-        await processPayment(event.data);
+        console.log("💰 PROCESSING PAYMENT & SYNCING...");
+        await processPaymentAndSync(event.data);
       } else {
         console.log("⏭️ Ignoring event:", event.event);
       }
 
     } catch (error) {
       console.error("💥 Webhook error:", error.message);
-      console.error("Stack:", error.stack);
     }
   });
   
@@ -86,24 +81,22 @@ router.post("/virtual-account", (req, res, next) => {
   });
 });
 
-// ✅ SIMPLE PAYMENT PROCESSING
-async function processPayment(data) {
+// ✅ PAYMENT PROCESSING WITH SYNC
+async function processPaymentAndSync(data) {
   const reference = data.reference;
   const amountNaira = Number(data.amount) / 100;
   
-  console.log(`\n💰 PAYMENT DETAILS:`);
+  console.log(`\n💰 PAYMENT PROCESSING:`);
   console.log(`   Reference: ${reference}`);
   console.log(`   Amount: ₦${amountNaira}`);
   console.log(`   Channel: ${data.channel}`);
-  console.log(`   Customer: ${data.customer?.email || 'N/A'}`);
-  console.log(`   Virtual Account: ${data.authorization?.receiver_bank_account_number || 'N/A'}`);
 
   const session = await mongoose.startSession();
   
   try {
     await session.withTransaction(async () => {
       // ✅ CHECK FOR DUPLICATES
-      console.log("🔍 Checking for duplicates...");
+      console.log("🔍 Checking duplicates...");
       const existing = await Transaction.findOne({ reference }).session(session);
       if (existing) {
         console.log(`⏭️ Already processed: ${reference}`);
@@ -116,38 +109,24 @@ async function processPayment(data) {
       const user = await findUser(data, session);
       
       if (!user) {
-        console.log("❌ USER NOT FOUND - Cannot credit wallet");
-        console.log("   Available data for debugging:");
-        console.log("   - Virtual Account:", data.authorization?.receiver_bank_account_number);
-        console.log("   - Customer Email:", data.customer?.email);
-        console.log("   - Metadata UserId:", data.metadata?.userId);
-        
-        // List all users with virtual accounts for debugging
-        const allUsers = await User.find({ 
-          "virtualAccount.accountNumber": { $exists: true } 
-        }).session(session).select('email virtualAccount');
-        
-        console.log("   Users with virtual accounts:");
-        allUsers.forEach(u => {
-          console.log(`     - ${u.email}: ${u.virtualAccount?.accountNumber || 'None'}`);
-        });
-        
+        console.log("❌ USER NOT FOUND");
+        console.log("   Virtual Account:", data.authorization?.receiver_bank_account_number);
+        console.log("   Customer Email:", data.customer?.email);
         return;
       }
 
       console.log(`✅ USER FOUND: ${user.email}`);
       console.log(`   Current Balance: ₦${user.walletBalance}`);
-      console.log(`   Virtual Account: ${user.virtualAccount?.accountNumber || 'None'}`);
 
-      // ✅ CREDIT WALLET
+      // ✅ STEP 1: CREDIT WALLET LOCALLY
       const balanceBefore = user.walletBalance;
       user.walletBalance += amountNaira;
       await user.save({ session });
 
-      console.log(`   New Balance: ₦${user.walletBalance}`);
+      console.log(`   New Local Balance: ₦${user.walletBalance}`);
 
-      // ✅ CREATE TRANSACTION
-      console.log("💾 Creating transaction...");
+      // ✅ STEP 2: CREATE LOCAL TRANSACTION
+      console.log("💾 Creating local transaction...");
       const transactionData = {
         userId: user._id,
         type: "virtual_account_topup",
@@ -168,18 +147,28 @@ async function processPayment(data) {
       };
 
       await Transaction.create([transactionData], { session });
-      console.log(`✅ Transaction created: ${reference}`);
+      console.log(`✅ Local transaction created: ${reference}`);
 
-      // ✅ SYNC TO MAIN BACKEND
-      console.log("🔄 Syncing to main backend...");
-      try {
-        await syncVirtualAccountTransferWithMainBackend(user._id, amountNaira, reference);
-        console.log("✅ Main backend sync completed");
-      } catch (syncError) {
-        console.error("❌ Sync failed:", syncError.message);
+      // ✅ STEP 3: SYNC TO MAIN BACKEND
+      console.log("\n🔄 STARTING SYNC TO MAIN BACKEND...");
+      const syncResult = await syncVirtualAccountTransferWithMainBackend(
+        user._id, 
+        amountNaira, 
+        reference
+      );
+
+      if (syncResult.success) {
+        console.log("🎉 SYNC SUCCESS - Balance updated in main backend");
+        console.log(`   Response:`, syncResult.data);
+      } else {
+        console.error("❌ SYNC FAILED - Main backend not updated");
+        console.error("   Error:", syncResult.error);
+        // You might want to implement a retry mechanism here
       }
 
-      console.log(`🎉 PAYMENT COMPLETE: ₦${amountNaira} credited to ${user.email}`);
+      console.log(`\n🎉 PAYMENT COMPLETE: ₦${amountNaira} credited to ${user.email}`);
+      console.log(`   Local Balance: ₦${user.walletBalance}`);
+      console.log(`   Sync Status: ${syncResult.success ? 'SUCCESS' : 'FAILED'}`);
     });
 
   } catch (error) {
@@ -192,7 +181,7 @@ async function processPayment(data) {
   }
 }
 
-// ✅ SIMPLE USER FINDING
+// ✅ USER FINDING
 async function findUser(data, session) {
   console.log("🔍 User search started");
   
@@ -207,8 +196,6 @@ async function findUser(data, session) {
     if (user) {
       console.log(`   ✅ Found via virtual account: ${user.email}`);
       return user;
-    } else {
-      console.log(`   ❌ No user with virtual account: ${accountNumber}`);
     }
   }
 
@@ -221,59 +208,37 @@ async function findUser(data, session) {
     if (user) {
       console.log(`   ✅ Found via email: ${user.email}`);
       return user;
-    } else {
-      console.log(`   ❌ No user with email: ${email}`);
     }
   }
 
-  // METHOD 3: Metadata UserId
-  if (data.metadata?.userId) {
-    console.log(`   Checking userId: ${data.metadata.userId}`);
-    const user = await User.findById(data.metadata.userId).session(session);
-    if (user) {
-      console.log(`   ✅ Found via userId: ${user.email}`);
-      return user;
-    }
-  }
-
-  console.log("   ❌ User not found with any method");
+  console.log("   ❌ User not found");
   return null;
 }
 
-// ✅ TEST ENDPOINT (using regular JSON)
-router.post("/test", express.json(), async (req, res) => {
+// ✅ TEST SYNC ENDPOINT
+router.post("/test-sync", express.json(), async (req, res) => {
   try {
-    const { virtualAccount, email, amount = 1000 } = req.body;
+    const { userId, amount, reference } = req.body;
     
-    console.log("🧪 TEST WEBHOOK REQUEST");
-    console.log("   Virtual Account:", virtualAccount);
-    console.log("   Email:", email);
+    console.log("🧪 TESTING SYNC FUNCTION");
+    console.log("   User ID:", userId);
     console.log("   Amount:", amount);
+    console.log("   Reference:", reference);
 
-    const testData = {
-      reference: `test_${Date.now()}`,
-      amount: amount * 100,
-      status: "success",
-      channel: "dedicated_nuban",
-      authorization: {
-        receiver_bank_account_number: virtualAccount
-      },
-      customer: {
-        email: email
-      }
-    };
-
-    await processPayment(testData);
+    const result = await syncVirtualAccountTransferWithMainBackend(userId, amount, reference);
     
     res.json({ 
       success: true, 
-      message: "Test completed - check server logs",
-      reference: testData.reference
+      message: "Sync test completed",
+      result: result 
     });
     
   } catch (error) {
-    console.error("Test error:", error);
-    res.status(500).json({ success: false, error: error.message });
+    console.error("Sync test error:", error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message
+    });
   }
 });
 
@@ -286,25 +251,6 @@ router.get("/check/:reference", async (req, res) => {
     res.json({
       exists: !!transaction,
       transaction: transaction
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ✅ CHECK ALL USERS WITH VIRTUAL ACCOUNTS
-router.get("/debug/users", async (req, res) => {
-  try {
-    const users = await User.find({ 
-      "virtualAccount.accountNumber": { $exists: true } 
-    }).select('email virtualAccount walletBalance');
-    
-    res.json({
-      users: users.map(u => ({
-        email: u.email,
-        virtualAccount: u.virtualAccount?.accountNumber,
-        walletBalance: u.walletBalance
-      }))
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
