@@ -1,149 +1,167 @@
-// routes/webhooks.js - PRODUCTION-READY PAYSTACK WEBHOOK (2025 BEST PRACTICES)
+// routes/webhooks.js - FINAL PRODUCTION VERSION WITH AMAZING LOGS (2025)
 const express = require("express");
 const router = express.Router();
 const crypto = require("crypto");
 const mongoose = require("mongoose");
+const net = require("net"); // For CIDR checking
 
-// Models
 const User = require("../models/User");
 const Transaction = require("../models/Transaction");
-
-// Utils
 const { syncVirtualAccountTransferWithMainBackend } = require("../utils/syncVirtualAccount");
 
-// Config
+// ===================== CONFIG =====================
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
-if (!PAYSTACK_SECRET_KEY) {
-  throw new Error("PAYSTACK_SECRET_KEY is not set in environment variables");
-}
+if (!PAYSTACK_SECRET_KEY) throw new Error("PAYSTACK_SECRET_KEY missing");
 
-// Paystack IPs (2025 updated list - always verify: https://paystack.com/docs/#webhooks-security)
-const PAYSTACK_IPS = [
+// Official Paystack IPs + YOUR custom testing IPs
+const ALLOWED_IPS = [
   "52.31.139.75",
   "52.49.173.169",
   "52.214.14.220",
   "52.30.107.86",
   "52.51.68.183",
   "52.214.218.189",
+  "74.220.48.240",           // ← Your custom IP
 ];
 
-// In-memory set to track processed event IDs (use an external store like Redis in high-traffic apps
-const processedEventIds = new Set();
+// CIDR range for your testing (e.g. ngrok, local tunnel)
+const ALLOWED_CIDR = ["74.220.56.0/24"];
 
-// ================ MAIN WEBHOOK ENDPOINT ================
+// In-memory processed events (use Redis in real prod
+const processedEvents = new Set();
+
+// Helper: Check if IP is in CIDR range
+function isIpInCidr(ip, cidr) {
+  const [range, bits] = cidr.split("/");
+  const mask = ~(2 ** (32 - bits) - 1);
+  const ipNum = ip.split(".").reduce((acc, octet) => (acc << 8) + parseInt(octet), 0) >>> 0;
+  const rangeNum = range.split(".").reduce((acc, octet) => (acc << 8) + parseInt(octet), 0) >>> 0;
+  return (ipNum & mask) === (rangeNum & mask);
+}
+
+// ===================== LOGGING UTILS =====================
+const log = {
+  info: (msg, meta) => console.log(`INFO  ${new Date().toISOString()} | ${msg}`, meta || ""),
+  success: (msg, meta) => console.log(`SUCCESS ${new Date().toISOString()} | ${msg}`, meta || ""),
+  warn: (msg, meta) => console.log(`WARN  ${new Date().toISOString()} | ${msg}`, meta || ""),
+  error: (msg, meta) => console.log(`ERROR ${new Date().toISOString()} | ${msg}`, meta || ""),
+  debug: (msg, meta) => console.log(`DEBUG ${new Date().toISOString()} | ${msg}`, meta || ""),
+};
+
+// ===================== MAIN WEBHOOK =====================
 router.post(
   "/paystack",
-  express.raw({ type: "application/json" }), // CRITICAL: Must come BEFORE any express.json()
+  express.raw({ type: "application/json" }),
   async (req, res) => {
-    const signature = req.headers["x-paystack-signature"];
-    const ip = req.ip || req.connection.remoteAddress;
+    const ip = (req.ip || req.connection.remoteAddress || "").replace("::ffff:", "");
+    const signature = req.headers["x-paystack-signature"]?.toString();
+    const eventId = req.headers["x-paystack-event-id"] || "unknown";
 
-    console.log("Paystack webhook received", {
-      ip,
-      eventId: req.headers["x-paystack-event-id"],
-      timestamp: new Date().toISOString(),
-    });
+    log.info("PAYSTACK WEBHOOK HIT", { ip, eventId, path: "/webhook/paystack" });
 
-    // === 1. IP Whitelisting (Recommended by Paystack) ===
-    if (!PAYSTACK_IPS.includes(ip.replace("::ffff:", ""))) {
-      console.warn("Unauthorized webhook IP:", ip);
+    // === 1. IP WHITELISTING ===
+    const isAllowedIp = ALLOWED_IPS.includes(ip) || ALLOWED_CIDR.some(cidr => isIpInCidr(ip, cidr));
+
+    if (!isAllowedIp) {
+      log.error("BLOCKED: Unauthorized IP", { ip, allowed: [...ALLOWED_IPS, ...ALLOWED_CIDR] });
       return res.status(401).send("Unauthorized IP");
     }
 
-    // === 2. Verify Signature Verification ===
+    log.success("IP allowed", { ip });
+
+    // === 2. SIGNATURE VERIFICATION ===
     if (!signature) {
-      console.warn("Missing x-paystack-signature header");
-      return res.status(400).send("Missing signature");
+      log.warn("Missing x-paystack-signature header");
+      return res.status(400).send("No signature");
     }
 
-    const hash = crypto
+    const computedHash = crypto
       .createHmac("sha512", PAYSTACK_SECRET_KEY)
-      .update(req.body) // req.body is Buffer thanks to express.raw()
+      .update(req.body)
       .digest("hex");
 
-    if (hash !== signature) {
-      console.error("Invalid Paystack signature", { received: signature, computed: hash });
+    log.debug("Signature check", {
+      received: signature.substring(0, 20) + "...",
+      computed: computedHash.substring(0, 20) + "...",
+      match: computedHash === signature ? "YES" : "NO",
+    });
+
+    if (computedHash !== signature) {
+      log.error("INVALID SIGNATURE - POSSIBLE ATTACK", {
+        received: signature,
+        computed: computedHash,
+        ip,
+      });
       return res.status(400).send("Invalid signature");
     }
 
-    // === 3. Parse Event Safely ===
+    log.success("Signature verified");
+
+    // === 3. PARSE EVENT ===
     let event;
     try {
       event = JSON.parse(req.body.toString("utf8"));
     } catch (err) {
-      console.error("Invalid JSON payload from Paystack");
+      log.error("Failed to parse JSON payload", { error: err.message });
       return res.status(400).send("Invalid JSON");
     }
 
-    // === 4. Prevent Duplicate Processing (Idempotency) ===
-    const eventId = event.id || event.event_id;
-    if (!eventId) {
-      console.warn("Event missing ID", event.event);
-      return res.status(400).send("Missing event ID");
-    }
-
-    if (processedEventIds.has(eventId)) {
-      console.log(`Duplicate event ignored: ${eventId}`);
+    // === 4. IDEMPOTENCY CHECK ===
+    if (processedEvents.has(event.id || event.event_id)) {
+      log.warn("Duplicate event ignored", { eventId: event.id, type: event.event });
       return res.status(200).send("OK");
     }
 
-    // Only process relevant events
-    if (event.event === "charge.success") {
-      // Queue long-running task
-      handleChargeSuccess(event.data).catch((err) => {
-        console.error("Unhandled error in handleChargeSuccess:", err);
-      });
-    }
-    // You can add more events later: transfer.success, etc.
+    log.info("New event received", {
+      event: event.event,
+      reference: event.data?.reference,
+      amount: event.data?.amount ? `${event.data.amount / 100} NGN` : "N/A",
+      customer: event.data?.customer?.email || "N/A",
+    });
 
-    // Mark as processed BEFORE returning 200 (prevents retry loops)
-    processedEventIds.add(eventId);
-
-    // Clean up old IDs occasionally (optional)
-    if (processedEventIds.size > 10000) {
-      // Keep last 5000 only
-      const entries = Array.from(processedEventIds).slice(-5000);
-      processedEventIds.clear();
-      entries.forEach((id) => processedEventIds.add(id));
+    // === 5. HANDLE ONLY VIRTUAL ACCOUNT TOPUPS ===
+    if (event.event === "charge.success" && event.data.channel === "dedicated_nuban") {
+      // Fire and forget — we already returned 200 soon
+      handleVirtualAccountTopup(event.data, event.id)
+        .then(() => log.success("Payment fully processed & synced"))
+        .catch(err => log.error("Background processing failed", { error: err.message }));
+    } else {
+      log.info("Event ignored (not a virtual account topup)", { event: event.event, channel: event.data?.channel });
     }
 
-    // === 5. Acknowledge immediately ===
+    // Mark as processed & acknowledge immediately
+    processedEvents.add(event.id || event.event_id);
     return res.status(200).send("OK");
   }
 );
 
-// ================ EVENT HANDLERS ================
-
-async function handleChargeSuccess(data) {
+// ===================== BACKGROUND PROCESSOR =====================
+async function handleVirtualAccountTopup(data, eventId) {
   const reference = data.reference;
-  const amountKobo = Number(data.amount);
-  const amountNaira = amountKobo / 100;
+  const amountNaira = Number(data.amount) / 100;
 
-  // Only process dedicated virtual account payments
-  if (data.channel !== "dedicated_nuban") {
-    console.log(`Ignoring non-virtual-account charge: ${reference} (${data.channel})`);
-    return;
-  }
-
-  if (data.status !== "success") {
-    console.log(`Ignoring non-success charge: ${reference}`);
-    return;
-  }
+  log.info("Starting wallet credit", {
+    reference,
+    amount: `₦${amountNaira}`,
+    accountNumber: data.authorization?.receiver_bank_account_number,
+    email: data.customer?.email,
+    eventId,
+  });
 
   const session = await mongoose.startSession();
 
   try {
     await session.withTransaction(async () => {
-      // Prevent double processing
-      const existingTx = await Transaction.findOne({ reference }).session(session);
-      if (existingTx) {
-        console.log(`Already processed: ${reference}`);
+      // Duplicate check
+      const exists = await Transaction.findOne({ reference }).session(session);
+      if (exists) {
+        log.warn("Already processed (DB check)", { reference });
         return;
       }
 
-      const user = await findUserByVirtualAccount(data, session);
+      const user = await findUser(data, session);
       if (!user) {
-        console.error("User not found for virtual account payment", {
+        log.error("USER NOT FOUND - CANNOT CREDIT", {
           reference,
           accountNumber: data.authorization?.receiver_bank_account_number,
           email: data.customer?.email,
@@ -152,79 +170,69 @@ async function handleChargeSuccess(data) {
         return;
       }
 
-      const balanceBefore = user.walletBalance;
+      log.success("User matched", { userId: user._id, email: user.email });
+
+      const before = user.walletBalance;
       user.walletBalance += amountNaira;
       await user.save({ session });
 
-      await Transaction.create(
-        [
-          {
-            userId: user._id,
-            type: "virtual_account_topup",
-            amount: amountNaira,
-            status: "Successful",
-            reference,
-            description: "Virtual account deposit via Paystack",
-            balanceBefore,
-            balanceAfter: user.walletBalance,
-            gateway: "paystack",
-            details: {
-              source: "paystack_webhook",
-              channel: data.channel,
-              paymentMethod: data.authorization?.channel || "dedicated_nuban",
-              customerEmail: data.customer?.email || user.email,
-              bank: data.authorization?.bank || "N/A",
-              virtualAccount: data.authorization?.receiver_bank_account_number,
-              paidAt: data.paid_at || new Date(),
-              eventId: data.id,
-            },
-          },
-        ],
-        { session }
-      );
+      await Transaction.create([{
+        userId: user._id,
+        type: "virtual_account_topup",
+        amount: amountNaira,
+        status: "Successful",
+        reference,
+        description: "Virtual account deposit",
+        balanceBefore: before,
+        balanceAfter: user.walletBalance,
+        gateway: "paystack",
+        details: {
+          source: "paystack_webhook",
+          eventId,
+          channel: "dedicated_nuban",
+          virtualAccount: data.authorization.receiver_bank_account_number,
+          bank: data.authorization.bank,
+          paidAt: data.paid_at,
+          signatureVerified: true,
+        },
+      }], { session });
 
-      console.log(`PAYMENT CREDITED: ₦${amountNaira} → ${user.email} | Ref: ${reference}`);
+      log.success("WALLET CREDITED", {
+        user: user.email,
+        credited: `₦${amountNaira}`,
+        newBalance: `₦${user.walletBalance}`,
+        reference,
+      });
 
-      // Sync to main backend (fire and forget)
-      syncVirtualAccountTransferWithMainBackend(user._id, amountNaira, reference).catch((err) =>
-        console.error("Main backend sync failed:", err.message)
-      );
+      // Sync to main backend
+      await syncVirtualAccountTransferWithMainBackend(user._id, amountNaira, reference);
+      log.success("Synced to main backend", { reference });
     });
-  } catch (error) {
-    console.error("Transaction failed for reference:", reference, error);
-    // Do NOT throw — we already returned 200 OK to Paystack
+  } catch (err) {
+    log.error("Transaction failed (rolled back)", { reference, error: err.message });
   } finally {
-    await session.endSession();
+    session.endSession();
   }
 }
 
-async function findUserByVirtualAccount(data, session) {
-  const accountNumber = data.authorization?.receiver_bank_account_number;
+async function findUser(data, session) {
+  const acc = data.authorization?.receiver_bank_account_number;
 
-  if (accountNumber) {
-    const user = await User.findOne({
-      "virtualAccount.accountNumber": accountNumber,
-    }).session(session);
-
+  if (acc) {
+    const user = await User.findOne({ "virtualAccount.accountNumber": acc }).session(session);
     if (user) return user;
   }
 
-  // Fallback: metadata.userId (if you pass it during initialization)
   if (data.metadata?.userId) {
-    return await User.findById(data.metadata.userId).session(session);
+    const user = await User.findById(data.metadata.userId).session(session);
+    if (user) return user;
   }
 
-  // Fallback: customer email
   if (data.customer?.email) {
     return await User.findOne({ email: data.customer.email.toLowerCase() }).session(session);
   }
 
   return null;
 }
-
-// ================ HEALTH CHECK (Optional) ================
-router.get("/paystack/health", (req, res) => {
-  res.status(200).json({ status: "ok", time: new Date().toISOString() });
-});
 
 module.exports = router;
