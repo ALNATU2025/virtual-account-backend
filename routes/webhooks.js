@@ -1,4 +1,4 @@
-// routes/webhooks.js - 
+// routes/webhooks.js - FIXED VERSION
 const express = require("express");
 const router = express.Router();
 const crypto = require("crypto");
@@ -10,9 +10,12 @@ const { syncVirtualAccountTransferWithMainBackend } = require("../utils/syncVirt
 
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
 
-// ✅ USE RAW BODY PARSER
+// ✅ PROPER RAW BODY HANDLING
 router.post("/virtual-account", express.raw({ type: 'application/json' }), async (req, res) => {
   console.log("💰 PAYSTACK WEBHOOK RECEIVED");
+  
+  // Store the raw body for signature verification
+  const rawBody = req.body.toString('utf8');
   
   // ✅ IMMEDIATE RESPONSE
   res.status(200).send("OK");
@@ -24,14 +27,15 @@ router.post("/virtual-account", express.raw({ type: 'application/json' }), async
       return;
     }
 
-    // ✅ VERIFY SIGNATURE
-    const hash = crypto.createHmac("sha512", PAYSTACK_SECRET_KEY).update(req.body).digest("hex");
+    // ✅ VERIFY SIGNATURE WITH RAW BODY (not parsed JSON)
+    const hash = crypto.createHmac("sha512", PAYSTACK_SECRET_KEY).update(rawBody).digest("hex");
     if (hash !== signature) {
       console.log("❌ Invalid signature");
       return;
     }
 
-    const event = JSON.parse(req.body.toString());
+    // ✅ NOW parse the JSON
+    const event = JSON.parse(rawBody);
     console.log("🔔 Event:", event.event);
 
     // ✅ PROCESS SUCCESSFUL PAYMENTS
@@ -167,8 +171,8 @@ async function findUser(data, session) {
   return null;
 }
 
-// ✅ TEST ENDPOINT
-router.post("/test", async (req, res) => {
+// ✅ TEST ENDPOINT (uses regular JSON)
+router.post("/test", express.json(), async (req, res) => {
   try {
     const { accountNumber, email, amount = 1000 } = req.body;
     
