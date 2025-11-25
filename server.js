@@ -14,11 +14,32 @@ async function ensureCriticalIndexes() {
   try {
     console.log('Ensuring critical indexes for zero double-funding...');
 
+    // First, clean up any transactions with null references
+    const Transaction = mongoose.model('Transaction');
+    const result = await Transaction.updateMany(
+      { reference: null },
+      { 
+        $set: { 
+          reference: `legacy_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+        } 
+      }
+    );
+    
+    if (result.modifiedCount > 0) {
+      console.log(`Cleaned up ${result.modifiedCount} transactions with null references`);
+    }
+
     await Promise.all([
       // This index is what makes double funding IMPOSSIBLE
       mongoose.connection.collection('transactions').createIndex(
         { reference: 1 },
-        { unique: true, background: true, name: 'unique_reference' }
+        { 
+          unique: true, 
+          background: true, 
+          name: 'unique_reference',
+          // Add partial filter to ignore nulls if they still exist
+          partialFilterExpression: { reference: { $type: "string" } }
+        }
       ),
 
       // Virtual account lookup
@@ -46,7 +67,6 @@ async function ensureCriticalIndexes() {
     // Don't crash — indexes might already exist
   }
 }
-
 // ==================== SYNC WITH MAIN BACKEND ====================
 const MAIN_BACKEND_URL = process.env.MAIN_BACKEND_URL || 'https://vtpass-backend.onrender.com';
 
@@ -153,3 +173,4 @@ async function startServer() {
 
 // Start the beast
 startServer();
+
