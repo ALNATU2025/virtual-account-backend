@@ -1,4 +1,4 @@
-// routes/webhooks.js - DEBUG VERSION
+// routes/webhooks.js - PRODUCTION VERSION
 const express = require("express");
 const router = express.Router();
 const crypto = require("crypto");
@@ -10,109 +10,88 @@ const { syncVirtualAccountTransferWithMainBackend } = require("../utils/syncVirt
 
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
 
-// ✅ DEBUG WEBHOOK - WILL SHOW EVERYTHING
+// ✅ PRODUCTION WEBHOOK - REAL PAYSTACK INTEGRATION
 router.post("/virtual-account", express.raw({ type: 'application/json' }), async (req, res) => {
-  console.log("🔔 WEBHOOK RECEIVED - STARTING DEBUG...");
+  console.log("💰 PAYSTACK PRODUCTION WEBHOOK RECEIVED");
   
-  // Store the raw body
+  // Store the raw body for signature verification
   const rawBody = req.body.toString('utf8');
   
-  // ✅ IMMEDIATE RESPONSE
-  res.status(200).send("OK");
-
   try {
     const signature = req.headers["x-paystack-signature"];
-    console.log("📧 Headers received:", {
-      signature: signature ? "Present" : "Missing",
-      contentType: req.headers["content-type"]
-    });
-
     if (!signature) {
-      console.log("❌ Missing signature");
-      return;
+      console.log("❌ Missing PayStack signature");
+      return res.status(400).send("Missing signature");
     }
 
-    // ✅ VERIFY SIGNATURE
+    // ✅ REAL SIGNATURE VERIFICATION (Production)
     const hash = crypto.createHmac("sha512", PAYSTACK_SECRET_KEY).update(rawBody).digest("hex");
-    console.log("🔐 Signature check:", {
-      received: signature.substring(0, 20) + "...",
-      computed: hash.substring(0, 20) + "...",
-      match: hash === signature
-    });
-
+    
     if (hash !== signature) {
-      console.log("❌ Invalid signature");
-      return;
+      console.log("❌ Invalid PayStack signature");
+      console.log("Expected:", hash.substring(0, 20) + "...");
+      console.log("Received:", signature.substring(0, 20) + "...");
+      return res.status(400).send("Invalid signature");
     }
 
-    // ✅ PARSE THE JSON
+    // ✅ Parse the JSON after signature verification
     const event = JSON.parse(rawBody);
-    console.log("📦 FULL EVENT DATA:", JSON.stringify(event, null, 2));
+    console.log("🔔 PayStack Event:", event.event);
 
-    // ✅ PROCESS SUCCESSFUL PAYMENTS
+    // ✅ PROCESS REAL PAYSTACK EVENTS
     if (event.event === "charge.success" && event.data?.status === "success") {
-      console.log("🎯 Processing successful charge...");
-      await processPayment(event.data);
+      console.log("🎯 Processing REAL payment from PayStack...");
+      await processRealPayment(event.data);
     } else {
       console.log("⏭️ Ignoring event:", event.event);
     }
 
+    // ✅ ALWAYS RETURN 200 TO PAYSTACK
+    res.status(200).send("OK");
+
   } catch (error) {
     console.error("💥 Webhook error:", error.message);
-    console.error("Stack:", error.stack);
+    // STILL return 200 to PayStack even on errors
+    res.status(200).send("OK");
   }
 });
 
-async function processPayment(data) {
+async function processRealPayment(data) {
   const reference = data.reference;
   const amountNaira = Number(data.amount) / 100;
   
-  console.log(`\n💰 PROCESSING PAYMENT:`);
+  console.log(`\n💰 PROCESSING REAL PAYMENT FROM PAYSTACK:`);
   console.log(`📦 Reference: ${reference}`);
   console.log(`💵 Amount: ₦${amountNaira}`);
   console.log(`📱 Channel: ${data.channel}`);
-  console.log(`🔍 Full payment data:`, JSON.stringify(data, null, 2));
+  console.log(`👤 Customer: ${data.customer?.email || 'N/A'}`);
 
   const session = await mongoose.startSession();
   
   try {
     await session.withTransaction(async () => {
       // ✅ CHECK FOR DUPLICATES
-      console.log("🔍 Checking for duplicate transactions...");
       const existing = await Transaction.findOne({ reference }).session(session);
       if (existing) {
-        console.log(`⏭️ ALREADY PROCESSED: ${reference}`);
+        console.log(`⏭️ Already processed: ${reference}`);
         return;
       }
-      console.log("✅ No duplicate found");
 
-      // ✅ FIND USER WITH DETAILED DEBUGGING
-      console.log("🔍 SEARCHING FOR USER...");
-      const user = await findUser(data, session);
-      
+      // ✅ FIND USER FOR REAL PAYMENT
+      const user = await findUserForRealPayment(data, session);
       if (!user) {
-        console.log("❌ USER NOT FOUND - Cannot process payment");
-        console.log("🔍 Available user data in webhook:");
-        console.log("   - Channel:", data.channel);
-        console.log("   - Virtual Account:", data.authorization?.receiver_bank_account_number);
-        console.log("   - Customer Email:", data.customer?.email);
-        console.log("   - Metadata UserId:", data.metadata?.userId);
-        console.log("   - Recipient Account:", data.recipient?.account_number);
-        console.log("   - Custom Fields:", data.metadata?.custom_fields);
-        
-        // Let's check what users exist in the database
-        const allUsers = await User.find({}).session(session).select('email virtualAccount');
-        console.log("🔍 ALL USERS IN DATABASE:");
-        allUsers.forEach(u => {
-          console.log(`   - ${u.email}: virtualAccount=${u.virtualAccount?.accountNumber || 'None'}`);
+        console.log("❌ USER NOT FOUND - Real payment cannot be credited");
+        console.log("🔍 PayStack data received:", {
+          channel: data.channel,
+          virtualAccount: data.authorization?.receiver_bank_account_number,
+          customerEmail: data.customer?.email,
+          metadata: data.metadata
         });
-        
         return;
       }
 
       console.log(`✅ USER FOUND: ${user.email}`);
       console.log(`📊 Balance Before: ₦${user.walletBalance}`);
-      console.log(`🏦 Virtual Account: ${user.virtualAccount?.accountNumber || 'None'}`);
 
       // ✅ CREDIT WALLET
       const balanceBefore = user.walletBalance;
@@ -120,7 +99,6 @@ async function processPayment(data) {
       await user.save({ session });
 
       // ✅ CREATE TRANSACTION
-      console.log("💾 Creating transaction record...");
       const transactionData = {
         userId: user._id,
         type: "virtual_account_topup",
@@ -137,20 +115,19 @@ async function processPayment(data) {
           paymentMethod: data.authorization?.channel || data.authorization?.card_type || data.channel,
           customerEmail: data.customer?.email || user.email,
           bank: data.authorization?.bank || data.authorization?.receiver_bank?.name || "N/A",
-          virtualAccount: data.authorization?.receiver_bank_account_number || "N/A"
+          virtualAccount: data.authorization?.receiver_bank_account_number || "N/A",
+          paidAt: data.paid_at || new Date().toISOString()
         }
       };
 
       await Transaction.create([transactionData], { session });
 
-      console.log(`🎉 PAYMENT SUCCESS!`);
+      console.log(`🎉 REAL PAYMENT SUCCESS!`);
       console.log(`✅ Credited: ₦${amountNaira} to ${user.email}`);
       console.log(`💰 New Balance: ₦${user.walletBalance}`);
-      console.log(`📝 Transaction Recorded: ${reference}`);
 
       // ✅ SYNC TO MAIN BACKEND
       try {
-        console.log("🔄 Syncing with main backend...");
         await syncVirtualAccountTransferWithMainBackend(user._id, amountNaira, reference);
         console.log("✅ Main backend sync completed");
       } catch (syncError) {
@@ -159,146 +136,107 @@ async function processPayment(data) {
     });
 
   } catch (error) {
-    console.error("💥 TRANSACTION FAILED:", error.message);
-    if (error.name === 'ValidationError') {
-      console.error("🔍 Validation errors:", JSON.stringify(error.errors, null, 2));
-    }
+    console.error("💥 Payment processing failed:", error.message);
   } finally {
     session.endSession();
   }
 }
 
-// ✅ USER FINDING WITH EXTENSIVE DEBUGGING
-async function findUser(data, session) {
+// ✅ USER FINDING FOR REAL PAYSTACK PAYMENTS
+async function findUserForRealPayment(data, session) {
   const channel = data.channel;
   
-  console.log("🔍 USER SEARCH STARTED...");
-  console.log("   Channel:", channel);
-  console.log("   Available data:", {
-    virtualAccount: data.authorization?.receiver_bank_account_number,
-    email: data.customer?.email,
-    userId: data.metadata?.userId,
-    recipient: data.recipient?.account_number
-  });
+  console.log("🔍 Searching for user with real PayStack data...");
 
-  // METHOD 1: Virtual Account
+  // METHOD 1: Virtual Account Payments
   if (channel === "dedicated_nuban") {
     const accountNumber = data.authorization?.receiver_bank_account_number;
-    console.log(`   🔍 METHOD 1: Virtual Account Search: ${accountNumber}`);
+    console.log(`🔍 Virtual account search: ${accountNumber}`);
     
     if (accountNumber) {
       const user = await User.findOne({ 
         "virtualAccount.accountNumber": accountNumber 
       }).session(session);
-      
       if (user) {
-        console.log(`   ✅ FOUND: Virtual account ${accountNumber} → ${user.email}`);
+        console.log(`✅ Found via virtual account: ${accountNumber}`);
         return user;
-      } else {
-        console.log(`   ❌ NOT FOUND: No user with virtual account ${accountNumber}`);
       }
-    } else {
-      console.log(`   ❌ SKIPPED: No virtual account number in webhook data`);
     }
   }
 
   // METHOD 2: Customer Email
   if (data.customer?.email) {
     const email = data.customer.email.toLowerCase().trim();
-    console.log(`   🔍 METHOD 2: Email Search: ${email}`);
+    console.log(`🔍 Email search: ${email}`);
     
     const user = await User.findOne({ email }).session(session);
     if (user) {
-      console.log(`   ✅ FOUND: Email ${email} → ${user.email}`);
+      console.log(`✅ Found via email: ${email}`);
       return user;
-    } else {
-      console.log(`   ❌ NOT FOUND: No user with email ${email}`);
     }
   }
 
-  // METHOD 3: Metadata UserId
+  // METHOD 3: Metadata
   if (data.metadata?.userId) {
-    console.log(`   🔍 METHOD 3: UserId Search: ${data.metadata.userId}`);
+    console.log(`🔍 UserId search: ${data.metadata.userId}`);
     const user = await User.findById(data.metadata.userId).session(session);
     if (user) {
-      console.log(`   ✅ FOUND: UserId ${data.metadata.userId} → ${user.email}`);
+      console.log(`✅ Found via userId: ${data.metadata.userId}`);
       return user;
-    } else {
-      console.log(`   ❌ NOT FOUND: No user with ID ${data.metadata.userId}`);
     }
   }
 
-  // METHOD 4: Recipient Account
-  if (data.recipient?.account_number) {
-    console.log(`   🔍 METHOD 4: Recipient Account: ${data.recipient.account_number}`);
-    const user = await User.findOne({ 
-      "virtualAccount.accountNumber": data.recipient.account_number 
-    }).session(session);
-    if (user) {
-      console.log(`   ✅ FOUND: Recipient account ${data.recipient.account_number} → ${user.email}`);
-      return user;
-    } else {
-      console.log(`   ❌ NOT FOUND: No user with recipient account ${data.recipient.account_number}`);
+  // METHOD 4: Custom Fields
+  if (data.metadata?.custom_fields) {
+    console.log("🔍 Checking custom fields...");
+    for (let field of data.metadata.custom_fields) {
+      if (field.variable_name === "account_number" || field.variable_name === "virtual_account") {
+        const user = await User.findOne({ 
+          "virtualAccount.accountNumber": field.value 
+        }).session(session);
+        if (user) return user;
+      }
     }
   }
 
-  console.log("   ❌ ALL USER SEARCH METHODS FAILED");
+  console.log("❌ User not found with any method");
   return null;
 }
 
-// ✅ TEST WITH REAL DATA
-router.post("/test-real", express.json(), async (req, res) => {
-  try {
-    const { virtualAccount, email, amount = 1000 } = req.body;
-    
-    const testData = {
-      reference: `test_real_${Date.now()}`,
-      amount: amount * 100,
-      status: "success",
-      channel: "dedicated_nuban",
-      authorization: {
-        receiver_bank_account_number: virtualAccount
-      },
-      customer: {
-        email: email
-      }
-    };
-
-    console.log("🧪 REAL TEST STARTING...");
-    await processPayment(testData);
-    
-    res.json({ 
-      success: true, 
-      message: "Test completed - check server logs for details",
-      reference: testData.reference
-    });
-    
-  } catch (error) {
-    console.error("Test error:", error);
-    res.status(500).json({ success: false, error: error.message });
-  }
+// ✅ PRODUCTION HEALTH CHECK
+router.get("/health", (req, res) => {
+  res.json({
+    status: "active",
+    service: "paystack-webhook",
+    environment: process.env.NODE_ENV,
+    timestamp: new Date().toISOString()
+  });
 });
 
-// ✅ CHECK ALL TRANSACTIONS (for debugging)
-router.get("/debug/transactions", async (req, res) => {
+// ✅ CHECK REAL TRANSACTIONS
+router.get("/transactions/:reference", async (req, res) => {
   try {
-    const transactions = await Transaction.find({}).sort({ createdAt: -1 }).limit(10);
-    const users = await User.find({}).select('email virtualAccount walletBalance');
+    const { reference } = req.params;
+    const transaction = await Transaction.findOne({ reference });
     
+    if (!transaction) {
+      return res.status(404).json({ 
+        exists: false, 
+        message: "Transaction not found" 
+      });
+    }
+
     res.json({
-      recentTransactions: transactions.map(t => ({
-        reference: t.reference,
-        type: t.type,
-        status: t.status,
-        amount: t.amount,
-        userId: t.userId,
-        createdAt: t.createdAt
-      })),
-      allUsers: users.map(u => ({
-        email: u.email,
-        virtualAccount: u.virtualAccount?.accountNumber,
-        walletBalance: u.walletBalance
-      }))
+      exists: true,
+      transaction: {
+        reference: transaction.reference,
+        type: transaction.type,
+        status: transaction.status,
+        amount: transaction.amount,
+        userId: transaction.userId,
+        description: transaction.description,
+        createdAt: transaction.createdAt
+      }
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
