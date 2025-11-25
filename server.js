@@ -14,31 +14,78 @@ async function ensureCriticalIndexes() {
   try {
     console.log('Ensuring critical indexes for zero double-funding...');
 
-    // First, clean up any transactions with null references
-    const Transaction = mongoose.model('Transaction');
-    const result = await Transaction.updateMany(
+    const collection = mongoose.connection.collection('transactions');
+    
+    // Step 1: Find and fix ALL duplicate references (not just nulls)
+    console.log('Scanning for duplicate references...');
+    
+    const duplicates = await collection.aggregate([
+      {
+        $match: {
+          reference: { $ne: null, $type: "string" }
+        }
+      },
+      {
+        $group: {
+          _id: "$reference",
+          count: { $sum: 1 },
+          ids: { $push: "$_id" }
+        }
+      },
+      {
+        $match: {
+          count: { $gt: 1 }
+        }
+      }
+    ]).toArray();
+
+    console.log(`Found ${duplicates.length} duplicate reference groups`);
+
+    // Step 2: Fix duplicates - keep the first one, modify the rest
+    for (const dup of duplicates) {
+      const [keepId, ...fixIds] = dup.ids;
+      
+      for (const fixId of fixIds) {
+        const newReference = `${dup._id}_dedup_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+        await collection.updateOne(
+          { _id: fixId },
+          { $set: { reference: newReference } }
+        );
+        console.log(`Fixed duplicate reference: ${dup._id} -> ${newReference}`);
+      }
+    }
+
+    // Step 3: Fix any remaining null references
+    const nullResult = await collection.updateMany(
       { reference: null },
       { 
         $set: { 
-          reference: `legacy_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+          reference: `legacy_null_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
         } 
       }
     );
     
-    if (result.modifiedCount > 0) {
-      console.log(`Cleaned up ${result.modifiedCount} transactions with null references`);
+    if (nullResult.modifiedCount > 0) {
+      console.log(`Cleaned up ${nullResult.modifiedCount} transactions with null references`);
     }
 
+    // Step 4: Drop existing index if it exists (to start fresh)
+    try {
+      await collection.dropIndex('unique_reference');
+      console.log('Dropped existing unique_reference index');
+    } catch (e) {
+      console.log('No existing unique_reference index to drop');
+    }
+
+    // Step 5: Create the critical indexes
     await Promise.all([
       // This index is what makes double funding IMPOSSIBLE
-      mongoose.connection.collection('transactions').createIndex(
+      collection.createIndex(
         { reference: 1 },
         { 
           unique: true, 
           background: true, 
-          name: 'unique_reference',
-          // Add partial filter to ignore nulls if they still exist
-          partialFilterExpression: { reference: { $type: "string" } }
+          name: 'unique_reference'
         }
       ),
 
@@ -55,13 +102,15 @@ async function ensureCriticalIndexes() {
       ),
 
       // Performance
-      mongoose.connection.collection('transactions').createIndex(
+      collection.createIndex(
         { userId: 1, createdAt: -1 },
         { background: true }
       )
     ]);
 
     console.log('ALL CRITICAL INDEXES ENSURED — DOUBLE FUNDING IS NOW IMPOSSIBLE');
+    console.log(`Fixed ${duplicates.length} duplicate reference groups and ${nullResult.modifiedCount} null references`);
+
   } catch (err) {
     console.error('Failed to create indexes:', err.message);
     // Don't crash — indexes might already exist
@@ -173,4 +222,5 @@ async function startServer() {
 
 // Start the beast
 startServer();
+
 
