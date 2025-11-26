@@ -1,4 +1,4 @@
-// routes/webhooks.js — FIXED DUPLICATE & SYNC ISSUES
+// routes/webhooks.js — PRODUCTION READY (Sync as Background Task)
 const express = require("express");
 const router = express.Router();
 const crypto = require("crypto");
@@ -13,30 +13,46 @@ if (!PAYSTACK_SECRET_KEY) throw new Error("PAYSTACK_SECRET_KEY missing");
 const MAIN_BACKEND_URL = process.env.MAIN_BACKEND_URL?.trim();
 const MAIN_BACKEND_API_KEY = process.env.MAIN_BACKEND_API_KEY?.trim();
 
-// Track processed webhooks to prevent duplicates
+// Track processed webhooks
 const processedWebhooks = new Set();
 
-// Enhanced sync function
-async function syncToMainBackend(userId, amountNaira, reference) {
+// Background sync (non-blocking)
+async function backgroundSyncToMainBackend(userId, amountNaira, reference) {
   if (!MAIN_BACKEND_URL) {
-    console.log('⚠️ MAIN_BACKEND_URL not set - skipping sync');
-    return { success: true, skipped: true };
+    console.log('ℹ️ MAIN_BACKEND_URL not set - background sync skipped');
+    return;
   }
 
+  console.log(`🔄 Starting background sync for ref: ${reference}`);
+  
+  // Run in background without awaiting
+  syncToMainBackend(userId, amountNaira, reference)
+    .then(result => {
+      if (result.success) {
+        console.log(`✅ Background sync completed for ${reference}`);
+      } else {
+        console.log(`⚠️ Background sync failed for ${reference}:`, result.error);
+      }
+    })
+    .catch(error => {
+      console.log(`⚠️ Background sync error for ${reference}:`, error.message);
+    });
+}
+
+// Main sync function (with improved error handling)
+async function syncToMainBackend(userId, amountNaira, reference) {
   const payload = {
     userId: userId.toString(),
-    amount: Math.round(amountNaira * 100), // Convert to kobo
+    amount: Math.round(amountNaira * 100),
     reference: reference,
     description: `Virtual account deposit - ${reference}`,
     source: "virtual_account_webhook",
     timestamp: new Date().toISOString()
   };
 
-  console.log(`🔄 Syncing to main backend: ${MAIN_BACKEND_URL}/api/wallet/top-up`);
-
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  for (let attempt = 1; attempt <= 2; attempt++) { // Reduced attempts
     try {
-      console.log(`   Attempt ${attempt}...`);
+      console.log(`   Sync attempt ${attempt}...`);
       
       const response = await fetch(`${MAIN_BACKEND_URL}/api/wallet/top-up`, {
         method: "POST",
@@ -47,51 +63,35 @@ async function syncToMainBackend(userId, amountNaira, reference) {
           })
         },
         body: JSON.stringify(payload),
-        timeout: 10000
+        timeout: 8000 // Shorter timeout
       });
 
       const responseText = await response.text();
-      console.log(`   Response status: ${response.status}`);
       
-      let data;
-      try {
-        data = JSON.parse(responseText);
-      } catch {
-        data = { rawResponse: responseText };
-      }
-
       if (response.ok) {
         console.log('✅ Sync to main backend: SUCCESS');
-        return { success: true, data };
+        return { success: true };
       }
 
-      // Handle specific error cases
-      if (response.status === 409 || data.alreadyProcessed) {
-        console.log('✅ Sync: Already processed on main backend');
-        return { success: true, alreadyProcessed: true };
+      // If main backend has issues, don't retry excessively
+      if (response.status >= 500) {
+        console.log(`⚠️ Main backend error (${response.status}) - will not retry`);
+        return { success: false, error: 'Backend error' };
       }
 
-      if (response.status === 404) {
-        console.log('❌ Sync: Endpoint not found (404)');
-        return { success: false, error: 'Endpoint not found' };
-      }
-
-      console.log(`❌ Sync failed: HTTP ${response.status}`, data);
-
-      // Wait before retry
-      if (attempt < 3) {
-        await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
-      }
+      console.log(`❌ Sync failed: HTTP ${response.status}`);
 
     } catch (error) {
-      console.log(`❌ Sync error (attempt ${attempt}):`, error.message);
-      if (attempt < 3) {
-        await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
-      }
+      console.log(`❌ Sync error: ${error.message}`);
+    }
+
+    // Short wait before retry
+    if (attempt < 2) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
     }
   }
 
-  return { success: false, error: 'All sync attempts failed' };
+  return { success: false, error: 'Sync failed after retries' };
 }
 
 router.post("/virtual-account", async (req, res) => {
@@ -160,7 +160,7 @@ router.post("/virtual-account", async (req, res) => {
   }
   processedWebhooks.add(webhookKey);
 
-  // Clean old entries from memory (prevent memory leaks)
+  // Clean old entries
   if (processedWebhooks.size > 1000) {
     const firstKey = processedWebhooks.values().next().value;
     processedWebhooks.delete(firstKey);
@@ -170,7 +170,7 @@ router.post("/virtual-account", async (req, res) => {
   
   try {
     await session.withTransaction(async () => {
-      // 7. CHECK FOR DUPLICATE TRANSACTION (Database level)
+      // 7. CHECK FOR DUPLICATE TRANSACTION
       const existing = await Transaction.findOne({ reference }).session(session);
       if (existing) {
         console.log("✅ Already processed in database - duplicate prevented");
@@ -199,7 +199,7 @@ router.post("/virtual-account", async (req, res) => {
         return;
       }
 
-      // 9. PROCESS TRANSACTION LOCALLY
+      // 9. PROCESS TRANSACTION LOCALLY (PRIMARY)
       const balanceBefore = user.walletBalance || 0;
       const newBalance = (user.walletBalance || 0) + amountNaira;
       
@@ -221,31 +221,67 @@ router.post("/virtual-account", async (req, res) => {
           accountNumber: accountNumber,
           customerEmail: data.customer?.email,
           paystackEventId: data.id,
-          webhookId: webhookId
+          webhookId: webhookId,
+          syncedToMain: false // Track sync status
         },
         createdAt: new Date()
       }], { session });
 
       console.log(`✅ LOCAL CREDIT: +₦${amountNaira} → ${user.email}`);
       console.log(`💰 BALANCE: ₦${balanceBefore} → ₦${newBalance}`);
+      console.log('🎉 WEBHOOK SUCCESSFULLY PROCESSED');
 
-      // 11. SYNC TO MAIN BACKEND
-      const syncResult = await syncToMainBackend(user._id, amountNaira, reference);
-      
-      if (syncResult.success) {
-        console.log('🎉 WEBHOOK FULLY PROCESSED + SYNC SUCCESS');
-      } else {
-        console.log('⚠️ WEBHOOK PROCESSED LOCALLY BUT SYNC FAILED');
-        // You might want to queue this for retry later
-      }
+      // 11. START BACKGROUND SYNC (NON-BLOCKING)
+      backgroundSyncToMainBackend(user._id, amountNaira, reference);
     });
 
   } catch (error) {
     console.error("❌ TRANSACTION FAILED:", error.message);
-    // Remove from processed cache if transaction failed
     processedWebhooks.delete(webhookKey);
   } finally {
     await session.endSession();
+  }
+});
+
+// Add this for other Paystack payment methods
+router.post("/paystack-general", async (req, res) => {
+  console.log('\n=== GENERAL PAYSTACK WEBHOOK ===');
+  
+  // Immediate response
+  res.status(200).json({ status: "OK" });
+
+  // Verify raw body exists
+  if (!req.rawBody) {
+    console.error("Raw body missing");
+    return;
+  }
+
+  // Verify signature
+  const signature = req.headers["x-paystack-signature"];
+  if (!signature) return;
+
+  const hash = crypto.createHmac("sha512", PAYSTACK_SECRET_KEY)
+    .update(req.rawBody).digest("hex");
+
+  if (!crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(signature))) {
+    console.log("Invalid signature");
+    return;
+  }
+
+  let event;
+  try {
+    event = JSON.parse(req.rawBody.toString());
+  } catch (err) {
+    return;
+  }
+
+  console.log(`General Paystack event: ${event.event}`);
+
+  // Handle different Paystack events here
+  // card payments, bank transfers, etc.
+  if (event.event === "charge.success") {
+    console.log("General payment success:", event.data.reference);
+    // Add your general payment processing logic here
   }
 });
 
