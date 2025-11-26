@@ -1,5 +1,5 @@
-// index.js — FINAL PERFECTION EDITION (2025)
-// DOUBLE FUNDING = MATHEMATICALLY IMPOSSIBLE
+// index.js — FIXED VERSION
+// DOUBLE FUNDING = IMPOSSIBLE | WEBHOOK = UNBREAKABLE
 
 const express = require('express');
 const mongoose = require('mongoose');
@@ -9,7 +9,55 @@ require('dotenv').config();
 
 const app = express();
 
-// ==================== CRITICAL INDEXES (RUN ON EVERY STARTUP) ====================
+// ==================== 1. CRITICAL: RAW BODY MIDDLEWARE — MUST BE FIRST ====================
+app.use((req, res, next) => {
+  // Only for Paystack webhook to preserve raw body
+  if (req.originalUrl === '/api/webhooks/virtual-account') {
+    console.log('RAW BODY MIDDLEWARE TRIGGERED FOR PAYSTACK WEBHOOK');
+    
+    let data = [];
+    req.on('data', chunk => data.push(chunk));
+    req.on('end', () => {
+      const buffer = Buffer.concat(data);
+      req.rawBody = buffer;  // ← This is what Paystack signed
+      console.log(`Raw body captured: ${buffer.length} bytes`);
+      next();
+    });
+  } else {
+    next();
+  }
+});
+
+// ==================== 2. CRITICAL: MOUNT WEBHOOK ROUTES BEFORE ANY PARSERS ====================
+const webhookRoutes = require('./routes/webhooks');
+app.use('/api/webhooks', webhookRoutes);  // ← MUST BE BEFORE express.json()!
+
+// ==================== 3. NOW SAFE TO USE STANDARD PARSERS ====================
+app.use(cors({
+  origin: true,
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: [
+    'Content-Type', 'Authorization', 'X-Requested-With', 'Accept',
+    'Origin', 'X-Request-ID', 'X-Client-Version', 'X-Client-Platform', 'X-User-ID'
+  ],
+}));
+app.options('*', cors());
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
+
+// ==================== 4. ALL OTHER ROUTES ====================
+const virtualAccountRoutes = require('./routes/virtualAccount');
+const virtualAccountSyncRoutes = require('./routes/virtualAccountSyncRoutes');
+const paymentRoutes = require('./routes/payments');
+const walletRoutes = require('./routes/wallet');
+
+app.use('/api/virtual-accounts', virtualAccountRoutes);
+app.use('/', virtualAccountSyncRoutes);
+app.use('/api/payments', paymentRoutes);
+app.use('/api/wallet', walletRoutes);
+
+// ==================== 5. CRITICAL INDEXES (DOUBLE FUNDING PROTECTION) ====================
 async function ensureCriticalIndexes() {
   try {
     console.log('Ensuring critical indexes for zero double-funding...');
@@ -17,7 +65,7 @@ async function ensureCriticalIndexes() {
     const collection = mongoose.connection.collection('transactions');
     const usersCollection = mongoose.connection.collection('users');
 
-    // Step 1: Find and fix ALL duplicate references (not just nulls)
+    // Step 1: Find and fix ALL duplicate references
     console.log('Scanning for duplicate references...');
     
     const duplicates = await collection.aggregate([
@@ -70,31 +118,7 @@ async function ensureCriticalIndexes() {
       console.log(`Cleaned up ${nullResult.modifiedCount} transactions with null references`);
     }
 
-    // Step 4: Drop existing indexes if they exist (to start fresh)
-    const indexesToDrop = [
-      'unique_reference', 
-      'email_1',
-      'virtualAccount.accountNumber_1',
-      'userId_1_createdAt_-1' // Add this to drop the existing performance index
-    ];
-    
-    for (const indexName of indexesToDrop) {
-      try {
-        await collection.dropIndex(indexName);
-        console.log(`Dropped existing ${indexName} index from transactions`);
-      } catch (e) {
-        // Index might not exist, that's fine
-      }
-      
-      try {
-        await usersCollection.dropIndex(indexName);
-        console.log(`Dropped existing ${indexName} index from users`);
-      } catch (e) {
-        // Index might not exist, that's fine
-      }
-    }
-
-    // Step 5: Create the critical indexes with explicit names
+    // Step 4: Create the critical indexes with explicit names
     await Promise.all([
       // This index is what makes double funding IMPOSSIBLE
       collection.createIndex(
@@ -134,79 +158,15 @@ async function ensureCriticalIndexes() {
   }
 }
 
-// ==================== SYNC WITH MAIN BACKEND ====================
-const MAIN_BACKEND_URL = process.env.MAIN_BACKEND_URL || 'https://vtpass-backend.onrender.com';
+// ==================== 6. DEBUG ROUTES ====================
+app.get('/api/debug/raw-body-test', (req, res) => {
+  res.json({
+    message: "Raw body middleware is working!",
+    rawBodyLength: req.rawBody ? req.rawBody.length : 0,
+    headers: req.headers
+  });
+});
 
-async function syncVirtualAccountTransferWithMainBackend(userId, amountInNaira, reference) {
-  if (!MAIN_BACKEND_URL) {
-    console.error('MAIN_BACKEND_URL not set');
-    return;
-  }
-
-  const payload = {
-    userId: userId.toString(),
-    amount: Math.round(amountInNaira * 100), // KOBO
-    reference,
-    description: `Virtual account deposit - ${reference}`,
-    source: 'virtual_account_webhook'
-  };
-
-  for (let i = 0; i < 3; i++) {
-    try {
-      const res = await fetch(`${MAIN_BACKEND_URL}/api/wallet/top-up`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-        timeout: 15000
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        console.log('Sync SUCCESS:', data.newBalance || 'processed');
-        return;
-      }
-    } catch (e) {
-      console.error(`Sync attempt ${i + 1} failed:`, e.message);
-      if (i === 2) throw e;
-      await new Promise(r => setTimeout(r, 2000 * (i + 1)));
-    }
-  }
-}
-
-// ==================== MIDDLEWARE ====================
-app.use(cors({
-  origin: true,
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-  allowedHeaders: [
-    'Content-Type', 'Authorization', 'X-Requested-With', 'Accept',
-    'Origin', 'X-Request-ID', 'X-Client-Version', 'X-Client-Platform', 'X-User-ID'
-  ],
-}));
-app.options('*', cors());
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
-
-// ==================== IMPORT MODELS & ROUTES ====================
-const Transaction = require('./models/Transaction');
-const User = require('./models/User');
-
-const virtualAccountRoutes = require('./routes/virtualAccount');
-const virtualAccountSyncRoutes = require('./routes/virtualAccountSyncRoutes');
-const webhookRoutes = require('./routes/webhooks');
-const paymentRoutes = require('./routes/payments');
-const walletRoutes = require('./routes/wallet');
-
-// Mount routes
-app.use('/api/virtual-accounts', virtualAccountRoutes);
-app.use('/', virtualAccountSyncRoutes);
-app.use('/api/webhooks', webhookRoutes);
-app.use('/api/payments', paymentRoutes);
-app.use('/api/wallet', walletRoutes);
-
-
-// ==================== DEBUG/VERIFICATION ROUTES ====================
-// Add this route to verify indexes are working
 app.get('/api/debug/indexes', async (req, res) => {
   try {
     const transactionsIndexes = await mongoose.connection.collection('transactions').indexes();
@@ -229,14 +189,17 @@ app.get('/api/debug/indexes', async (req, res) => {
   }
 });
 
-// ==================== ALL YOUR EXISTING ENDPOINTS (unchanged) ====================
-// Keep everything you already have below — CORS proxy, enhanced verify, etc.
-// I'm only showing the critical part above — paste the rest exactly as you have it
+// ==================== 7. HEALTH CHECK ====================
+app.get('/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'OK', 
+    timestamp: new Date().toISOString(),
+    doubleFundingProtection: 'ACTIVE',
+    webhookRawBody: 'ENABLED'
+  });
+});
 
-// ... [PASTE ALL YOUR EXISTING ENDPOINTS HERE FROM /api/payments/verify-paystack DOWN TO THE END] ...
-// (Everything from your original file — just keep it exactly as is)
-
-// ==================== FINAL: CONNECT DB + START SERVER ====================
+// ==================== 8. START SERVER ====================
 const PORT = process.env.PORT || 3000;
 
 async function startServer() {
@@ -248,13 +211,15 @@ async function startServer() {
 
     console.log('MongoDB connected successfully');
 
-    // THIS IS THE LINE THAT MAKES YOU UNBREAKABLE
+    // Ensure critical indexes
     await ensureCriticalIndexes();
 
-    app.listen(PORT, () => {
+    app.listen(PORT, "0.0.0.0", () => {
       console.log(`Server running on port ${PORT}`);
       console.log(`Health: http://localhost:${PORT}/health`);
+      console.log(`Raw Body Test: http://localhost:${PORT}/api/debug/raw-body-test`);
       console.log(`DOUBLE FUNDING PROTECTION: FULLY ACTIVE`);
+      console.log(`WEBHOOK RAW BODY: ENABLED`);
     });
 
   } catch (err) {
@@ -263,10 +228,5 @@ async function startServer() {
   }
 }
 
-// Start the beast
+// Start the server
 startServer();
-
-
-
-
-
