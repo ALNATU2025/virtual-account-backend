@@ -102,10 +102,10 @@ router.post("/paystack", async (req, res) => {
   }
 
   // 4. Only process successful payments
-  if (event.event !== "charge.success" || event.data?.status !== "success") {
-    console.log(`Ignored: ${event.event} | Status: ${event.data?.status}`);
-    return;
-  }
+ if (event.event !== "charge.success" || event.data?.status !== "success") {
+  console.log(`Ignored: ${event.event} | Status: ${event.data?.status || 'unknown'}`);
+  return;
+}
 
   const data = event.data;
   const reference = data.reference;
