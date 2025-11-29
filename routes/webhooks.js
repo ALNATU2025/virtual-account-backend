@@ -1,4 +1,7 @@
-// routes/webhooks.js — PRODUCTION READY (Sync as Background Task)
+// routes/webhooks.js - FINAL PRODUCTION VERSION
+// Handles: Virtual Account + Card + OPay + USSD + Bank Transfer
+// Zero double funding | Instant credit | Background sync
+
 const express = require("express");
 const router = express.Router();
 const crypto = require("crypto");
@@ -10,109 +13,71 @@ const Transaction = require("../models/Transaction");
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY?.trim();
 if (!PAYSTACK_SECRET_KEY) throw new Error("PAYSTACK_SECRET_KEY missing");
 
-const MAIN_BACKEND_URL = process.env.MAIN_BACKEND_URL?.trim();
-const MAIN_BACKEND_API_KEY = process.env.MAIN_BACKEND_API_KEY?.trim();
-
 // Track processed webhooks
 const processedWebhooks = new Set();
 
-// Background sync (non-blocking)
+// Background sync to main backend
 async function backgroundSyncToMainBackend(userId, amountNaira, reference) {
-  if (!MAIN_BACKEND_URL) {
-    console.log('ℹ️ MAIN_BACKEND_URL not set - background sync skipped');
-    return;
-  }
+  const MAIN_BACKEND_URL = process.env.MAIN_BACKEND_URL?.trim();
+  if (!MAIN_BACKEND_URL) return;
 
-  console.log(`🔄 Starting background sync for ref: ${reference}`);
-  
-  // Run in background without awaiting
+  console.log(`Background sync → main backend for ${reference}`);
+
   syncToMainBackend(userId, amountNaira, reference)
-    .then(result => {
-      if (result.success) {
-        console.log(`✅ Background sync completed for ${reference}`);
-      } else {
-        console.log(`⚠️ Background sync failed for ${reference}:`, result.error);
-      }
-    })
-    .catch(error => {
-      console.log(`⚠️ Background sync error for ${reference}:`, error.message);
-    });
+    .catch(err => console.log(`Background sync failed: ${err.message}`));
 }
 
-// Main sync function (with improved error handling)
 async function syncToMainBackend(userId, amountNaira, reference) {
   const payload = {
     userId: userId.toString(),
     amount: Math.round(amountNaira * 100),
-    reference: reference,
-    description: `Virtual account deposit - ${reference}`,
-    source: "virtual_account_webhook",
+    reference,
+    description: `PayStack payment - ${reference}`,
+    source: "paystack_webhook",
     timestamp: new Date().toISOString()
   };
 
-  for (let attempt = 1; attempt <= 2; attempt++) { // Reduced attempts
+  for (let i = 0; i < 2; i++) {
     try {
-      console.log(`   Sync attempt ${attempt}...`);
-      
-      const response = await fetch(`${MAIN_BACKEND_URL}/api/wallet/top-up`, {
+      const res = await fetch(`${process.env.MAIN_BACKEND_URL}/api/wallet/top-up`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...(MAIN_BACKEND_API_KEY && { 
-            "x-internal-api-key": MAIN_BACKEND_API_KEY
-          })
+          ...(process.env.MAIN_BACKEND_API_KEY && { "x-internal-api-key": process.env.MAIN_BACKEND_API_KEY })
         },
         body: JSON.stringify(payload),
-        timeout: 8000 // Shorter timeout
+        timeout: 8000
       });
 
-      const responseText = await response.text();
-      
-      if (response.ok) {
-        console.log('✅ Sync to main backend: SUCCESS');
+      if (res.ok) {
+        console.log('Main backend sync: SUCCESS');
         return { success: true };
       }
-
-      // If main backend has issues, don't retry excessively
-      if (response.status >= 500) {
-        console.log(`⚠️ Main backend error (${response.status}) - will not retry`);
-        return { success: false, error: 'Backend error' };
-      }
-
-      console.log(`❌ Sync failed: HTTP ${response.status}`);
-
-    } catch (error) {
-      console.log(`❌ Sync error: ${error.message}`);
+    } catch (e) {
+      console.log(`Sync attempt ${i + 1} failed: ${e.message}`);
     }
-
-    // Short wait before retry
-    if (attempt < 2) {
-      await new Promise(resolve => setTimeout(resolve, 1000));
-    }
+    await new Promise(r => setTimeout(r, 1000));
   }
-
-  return { success: false, error: 'Sync failed after retries' };
+  return { success: false };
 }
 
-router.post("/virtual-account", async (req, res) => {
+// MAIN PAYSTACK WEBHOOK - HANDLES ALL PAYMENT METHODS
+router.post("/paystack", async (req, res) => {
   const webhookId = `wh_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
-  console.log(`\n=== PAYSTACK WEBHOOK [${webhookId}] ===`);
+  console.log(`\nPAYSTACK WEBHOOK [${webhookId}]`);
 
-  // 1. IMMEDIATE 200 OK
+  // 1. Immediate response
   res.status(200).json({ status: "OK", id: webhookId });
 
-  // 2. VERIFY RAW BODY
-  if (!req.rawBody || !(req.rawBody instanceof Buffer)) {
-    console.error("❌ RAW BODY MISSING");
+  // 2. Verify raw body & signature
+  if (!req.rawBody) {
+    console.error("RAW BODY MISSING");
     return;
   }
 
-  console.log(`✅ Raw body: ${req.rawBody.length} bytes`);
-
-  // 3. VERIFY SIGNATURE
   const signature = req.headers["x-paystack-signature"];
   if (!signature) {
-    console.log("❌ Missing signature");
+    console.log("Missing signature");
     return;
   }
 
@@ -121,167 +86,102 @@ router.post("/virtual-account", async (req, res) => {
     .digest("hex");
 
   if (!crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(signature))) {
-    console.log("❌ Invalid signature");
+    console.log("Invalid signature");
     return;
   }
 
-  console.log("✅ Signature verified");
+  console.log("Signature verified");
 
-  // 4. PARSE EVENT
+  // 3. Parse event
   let event;
   try {
     event = JSON.parse(req.rawBody.toString());
-    console.log(`✅ Event: ${event.event}`);
   } catch (err) {
-    console.log("❌ Invalid JSON");
+    console.log("Invalid JSON");
     return;
   }
 
-  // 5. FILTER RELEVANT EVENTS
-  if (event.event !== "charge.success" || 
-      event.data?.channel !== "dedicated_nuban" || 
-      event.data?.status !== "success") {
-    console.log("ℹ️ Ignoring irrelevant event");
+  // 4. Only process successful payments
+  if (event.event !== "charge.success" || event.data?.status !== "success") {
+    console.log(`Ignored: ${event.event} | Status: ${event.data?.status}`);
     return;
   }
 
   const data = event.data;
   const reference = data.reference;
   const amountNaira = data.amount / 100;
-  const accountNumber = data.authorization?.receiver_bank_account_number;
 
-  console.log(`💰 Processing: ₦${amountNaira} | Ref: ${reference} | Account: ${accountNumber}`);
+  console.log(`PAYMENT SUCCESS: ₦${amountNaira} | Ref: ${reference} | Channel: ${data.channel}`);
 
-  // 6. DUPLICATE WEBHOOK PROTECTION
-  const webhookKey = `${reference}_${data.id}_${amountNaira}`;
-  if (processedWebhooks.has(webhookKey)) {
-    console.log('🛑 DUPLICATE WEBHOOK - Already processed, ignoring');
+  // 5. Prevent duplicates
+  const key = `${reference}_${data.id}`;
+  if (processedWebhooks.has(key)) {
+    console.log("Duplicate webhook ignored");
     return;
   }
-  processedWebhooks.add(webhookKey);
-
-  // Clean old entries
-  if (processedWebhooks.size > 1000) {
-    const firstKey = processedWebhooks.values().next().value;
-    processedWebhooks.delete(firstKey);
-  }
+  processedWebhooks.add(key);
 
   const session = await mongoose.startSession();
-  
   try {
     await session.withTransaction(async () => {
-      // 7. CHECK FOR DUPLICATE TRANSACTION
+      // Check if already processed
       const existing = await Transaction.findOne({ reference }).session(session);
       if (existing) {
-        console.log("✅ Already processed in database - duplicate prevented");
+        console.log("Already credited");
         return;
       }
 
-      // 8. FIND USER
+      // Find user by metadata.userId or email
       let user = null;
-      
-      if (accountNumber) {
-        user = await User.findOne({ 
-          "virtualAccount.accountNumber": accountNumber 
-        }).session(session);
-        console.log(`🔍 User lookup by account ${accountNumber}: ${user ? `FOUND (${user.email})` : 'NOT FOUND'}`);
+      const userId = data.metadata?.userId;
+      const email = data.customer?.email;
+
+      if (userId) {
+        user = await User.findById(userId).session(session);
       }
-      
-      if (!user && data.customer?.email) {
-        user = await User.findOne({ 
-          email: data.customer.email.toLowerCase().trim() 
-        }).session(session);
-        console.log(`🔍 User lookup by email ${data.customer.email}: ${user ? 'FOUND' : 'NOT FOUND'}`);
+      if (!user && email) {
+        user = await User.findOne({ email: email.toLowerCase().trim() }).session(session);
       }
-      
+
       if (!user) {
-        console.log("❌ User not found for this transaction");
+        console.log("User not found");
         return;
       }
 
-      // 9. PROCESS TRANSACTION LOCALLY (PRIMARY)
+      // Credit wallet
       const balanceBefore = user.walletBalance || 0;
-      const newBalance = (user.walletBalance || 0) + amountNaira;
-      
-      user.walletBalance = newBalance;
+      user.walletBalance = balanceBefore + amountNaira;
       await user.save({ session });
 
-      // 10. CREATE TRANSACTION RECORD
+      // Record transaction
       await Transaction.create([{
         userId: user._id,
-        type: "virtual_account_topup",
+        type: "wallet_funding",
         amount: amountNaira,
-        status: "Successful",
         reference,
+        status: "success",
         balanceBefore,
-        balanceAfter: newBalance,
+        balanceAfter: user.walletBalance,
         gateway: "paystack",
-        description: `Virtual account deposit - ${reference}`,
+        description: `PayStack payment (${data.channel || 'unknown'}) - ${reference}`,
         metadata: {
-          accountNumber: accountNumber,
-          customerEmail: data.customer?.email,
-          paystackEventId: data.id,
-          webhookId: webhookId,
-          syncedToMain: false // Track sync status
-        },
-        createdAt: new Date()
+          channel: data.channel,
+          paystackData: data,
+          webhookId
+        }
       }], { session });
 
-      console.log(`✅ LOCAL CREDIT: +₦${amountNaira} → ${user.email}`);
-      console.log(`💰 BALANCE: ₦${balanceBefore} → ₦${newBalance}`);
-      console.log('🎉 WEBHOOK SUCCESSFULLY PROCESSED');
+      console.log(`CREDITED: +₦${amountNaira} → ${user.email}`);
+      console.log(`BALANCE: ₦${balanceBefore} → ₦${user.walletBalance}`);
 
-      // 11. START BACKGROUND SYNC (NON-BLOCKING)
+      // Background sync
       backgroundSyncToMainBackend(user._id, amountNaira, reference);
     });
-
   } catch (error) {
-    console.error("❌ TRANSACTION FAILED:", error.message);
-    processedWebhooks.delete(webhookKey);
+    console.error("TRANSACTION FAILED:", error.message);
+    processedWebhooks.delete(key);
   } finally {
     await session.endSession();
-  }
-});
-
-// Add this for other Paystack payment methods
-router.post("/paystack-general", async (req, res) => {
-  console.log('\n=== GENERAL PAYSTACK WEBHOOK ===');
-  
-  // Immediate response
-  res.status(200).json({ status: "OK" });
-
-  // Verify raw body exists
-  if (!req.rawBody) {
-    console.error("Raw body missing");
-    return;
-  }
-
-  // Verify signature
-  const signature = req.headers["x-paystack-signature"];
-  if (!signature) return;
-
-  const hash = crypto.createHmac("sha512", PAYSTACK_SECRET_KEY)
-    .update(req.rawBody).digest("hex");
-
-  if (!crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(signature))) {
-    console.log("Invalid signature");
-    return;
-  }
-
-  let event;
-  try {
-    event = JSON.parse(req.rawBody.toString());
-  } catch (err) {
-    return;
-  }
-
-  console.log(`General Paystack event: ${event.event}`);
-
-  // Handle different Paystack events here
-  // card payments, bank transfers, etc.
-  if (event.event === "charge.success") {
-    console.log("General payment success:", event.data.reference);
-    // Add your general payment processing logic here
   }
 });
 
