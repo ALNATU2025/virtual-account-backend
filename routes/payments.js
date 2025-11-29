@@ -15,38 +15,19 @@ if (!PAYSTACK_SECRET_KEY) {
 
 console.log('✅ Payments API initialized with secure configuration');
 
-// ==================== CORS MIDDLEWARE ====================
+// ==================== CORS MIDDLEWARE — FINAL WORKING VERSION ====================
 router.use((req, res, next) => {
-  // Allow all origins in development, specific in production
-  const allowedOrigins = [
-    'https://virtual-account-backend.onrender.com',
-    'https://vtpass-backend.onrender.com',
-    'http://localhost:3000',
-    'http://localhost:5000',
-    'http://localhost:8080',
-    'http://127.0.0.1:3000',
-    'http://127.0.0.1:5000',
-    'http://127.0.0.1:8080'
-  ];
-  
-  const origin = req.headers.origin;
-  if (allowedOrigins.includes(origin)) {
-    res.header('Access-Control-Allow-Origin', origin);
-  } else {
-    // For mobile apps and other clients, allow specific origins or use *
-    res.header('Access-Control-Allow-Origin', 'https://virtual-account-backend.onrender.com');
-  }
-  
+  // THIS IS ALL YOU NEED — ALLOWS MOBILE APPS, WEB, CAPACITOR, AND EVERYTHING
+  res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Client-Platform, X-Request-ID, X-User-ID');
   res.header('Access-Control-Allow-Credentials', 'true');
-  res.header('Access-Control-Max-Age', '86400'); // 24 hours
 
-  // Handle preflight requests
+  // Handle preflight (OPTIONS) requests
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
-  
+
   next();
 });
 
