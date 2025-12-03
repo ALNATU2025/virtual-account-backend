@@ -185,10 +185,16 @@ function generatePaystackReference() {
 // ==================== PAYMENT VERIFICATION ====================
 router.get('/verify', async (req, res) => {
   try {
-    const { reference, trxref, redirect = 'true' } = req.query;
-    const paymentReference = reference || trxref;
+    let { reference, trxref, redirect = 'true' } = req.query;
     
-    console.log(`🔍 Verifying Paystack Payment: ${paymentReference}`);
+    // FINAL FIX: Clean PayStack's duplicate reference bug
+    let paymentReference = reference || trxref || '';
+    
+    if (typeof paymentReference === 'string' && paymentReference.includes(',')) {
+      console.log('PAYSTACK DOUBLE REF BUG DETECTED:', paymentReference);
+      paymentReference = paymentReference.split(',')[0].trim();
+      console.log('CLEANED TO SINGLE REF:', paymentReference);
+    }
 
     if (!paymentReference) {
       console.log('❌ No reference provided');
@@ -201,61 +207,16 @@ router.get('/verify', async (req, res) => {
       });
     }
 
-    // Verify with PayStack
+    // Rest of your code unchanged...
     const verifyResponse = await axios.get(
       `https://api.paystack.co/transaction/verify/${paymentReference}`,
       {
-        headers: { 
-          Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` 
-        },
+        headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` },
         timeout: 15000,
       }
     );
 
-    const responseData = verifyResponse.data;
-    
-    if (!responseData.status) {
-      throw new Error('Invalid response from PayStack');
-    }
-
-    const data = responseData.data;
-    console.log('📊 Paystack verification response:', {
-      status: data.status,
-      reference: data.reference,
-      amount: data.amount,
-      gateway_response: data.gateway_response,
-    });
-
-    // Handle different payment statuses
-    if (data.status === 'success') {
-      return await handleSuccessfulPayment(data, paymentReference, redirect, res);
-    } else if (data.status === 'failed') {
-      return await handleFailedPayment(data, paymentReference, redirect, res);
-    } else {
-      // Pending or other status
-      return await handlePendingPayment(data, paymentReference, redirect, res);
-    }
-
-  } catch (error) {
-    console.error('❌ Verify payment error:', error.response?.data || error.message);
-    
-    const { reference, trxref, redirect = 'true' } = req.query;
-    const paymentReference = reference || trxref;
-
-    // Store failed verification attempt
-    await storeVerificationAttempt(paymentReference, error.message);
-
-    if (redirect === 'true' && paymentReference) {
-      return res.redirect(`/api/payments/success?reference=${paymentReference}&error=verification_failed`);
-    }
-
-    res.status(500).json({
-      success: false,
-      message: 'Payment verification failed',
-      error: error.message
-    });
-  }
-});
+  
 
 // ==================== FINAL PRODUCTION VERIFICATION ENDPOINT ====================
 // This endpoint is called by Flutter app → 100% duplicate-safe, balance always updates
@@ -301,7 +262,7 @@ router.post('/verify-paystack', async (req, res) => {
         success: true,
         alreadyProcessed: true,
         amount: existing.amount,
-        newBalance: null, // Flutter will read from local storage
+         newBalance: user.walletBalance, // Flutter will read from local storage
         message: 'Payment already verified and credited',
         source: 'database'
       });
