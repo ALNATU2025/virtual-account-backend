@@ -400,6 +400,105 @@ router.post('/verify-paystack', async (req, res) => {
   }
 });
 
+
+// ==================== PAYMENT SUCCESS REDIRECT HANDLER ====================
+// Catches PayStack's redirect after successful payment
+router.get('/success', async (req, res) => {
+  const { reference, error, status, amount } = req.query;
+  
+  console.log('SUCCESS REDIRECT: PayStack redirected to success page', {
+    reference,
+    error,
+    status,
+    amount,
+    fullUrl: req.url
+  });
+
+  if (error || status === 'failed') {
+    // Failed payment — redirect to error page or show message
+    console.log('❌ Redirect to failure page:', error);
+    return res.redirect(`/api/payments/failure?reference=${reference || ''}&error=${error || 'unknown'}`);
+  }
+
+  // SUCCESS: Extract clean reference (handle duplicates)
+  let cleanRef = reference?.toString() || '';
+  if (cleanRef.includes(',')) {
+    cleanRef = cleanRef.split(',')[0].trim();
+  }
+
+  // Verify the transaction (non-blocking — user sees success page)
+  verifyPaymentInBackground(cleanRef).catch(err => {
+    console.error('Background verification failed:', err);
+  });
+
+  // Show success page (HTML or redirect to Flutter deep link)
+  if (req.headers['user-agent']?.includes('Flutter') || req.query.platform === 'mobile') {
+    // For mobile apps — redirect to your app's success scheme
+    const mobileRedirect = `dalabapay://payment-success?ref=${cleanRef}&amount=${amount || 0}`;
+    return res.redirect(mobileRedirect);
+  }
+
+  // Web fallback: Simple success HTML
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head><title>Payment Successful</title></head>
+    <body style="font-family: Arial; text-align: center; padding: 50px;">
+      <h1>✅ Payment Successful!</h1>
+      <p>Reference: <strong>${cleanRef}</strong></p>
+      <p>Amount: ₦${amount || '0'}</p>
+      <script>
+        // Auto-redirect to your app or close window after 3s
+        setTimeout(() => { window.close(); }, 3000);
+      </script>
+    </body>
+    </html>
+  `);
+});
+
+// ==================== PAYMENT FAILURE REDIRECT HANDLER ====================
+// Optional: Handle failure redirects
+router.get('/failure', async (req, res) => {
+  const { reference, error } = req.query;
+  
+  console.log('FAILURE REDIRECT: Payment failed', { reference, error });
+
+  if (req.headers['user-agent']?.includes('Flutter') || req.query.platform === 'mobile') {
+    const mobileRedirect = `dalabapay://payment-failed?ref=${reference || ''}&error=${error || 'unknown'}`;
+    return res.redirect(mobileRedirect);
+  }
+
+  // Web fallback: Simple failure HTML
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head><title>Payment Failed</title></head>
+    <body style="font-family: Arial; text-align: center; padding: 50px; color: red;">
+      <h1>❌ Payment Failed</h1>
+      <p>Error: ${error || 'Unknown'}</p>
+      <p>Reference: <strong>${reference || 'N/A'}</strong></p>
+      <script>setTimeout(() => { window.close(); }, 3000);</script>
+    </body>
+    </html>
+  `);
+});
+
+// ==================== BACKGROUND VERIFICATION HELPER ====================
+// Non-blocking verification after redirect (logs but doesn't crash)
+async function verifyPaymentInBackground(reference) {
+  try {
+    console.log('🔍 Background verification for:', reference);
+    
+    const result = await axios.post('/verify-paystack', { reference });
+    
+    if (result.data.success || result.data.alreadyProcessed) {
+      console.log('✅ Background verification completed:', reference);
+    }
+  } catch (err) {
+    console.error('⚠️ Background verification failed (non-critical):', err.message);
+  }
+}
+
 // ==================== PROXY SUCCESS HANDLER ====================
 async function handleProxySuccessfulPayment(transactionData, res) {
   try {
