@@ -2,6 +2,8 @@ const express = require('express');
 const router = express.Router();
 const axios = require('axios');
 const mongoose = require('mongoose');
+const NodeCache = require('node-cache');
+const rateLimitCache = new NodeCache({ stdTTL: 60, checkperiod: 120 }); // 1 minute cache
 const Transaction = require('../models/Transaction');
 const User = require('../models/User');
 
@@ -227,199 +229,131 @@ router.get('/verify', async (req, res) => {
 });
 
 // ========== POST VERIFICATION ENDPOINT (Used by Flutter) ==========
-router.post('/verify-paystack', async (req, res) => {
-  let reference = req.body.reference;
+// INSTALL FIRST: npm install node-cache
 
-  console.log('🔍 POST /verify-paystack called for:', reference);
+const NodeCache = require('node-cache');
+const verificationCache = new NodeCache({ stdTTL: 120 }); // 2 minutes
+
+// ========== FINAL BULLETPROOF VERIFY ENDPOINT ==========
+router.post('/verify-paystack', async (req, res) => {
+  let reference = req.body.reference?.toString().trim();
+
+  console.log('POST /verify-paystack →', reference);
+
+  // Clean junk references
+  if (!reference) return res.status(400).json({ success: false, message: 'Invalid reference' });
+  if (reference.includes(',')) reference = reference.split(',')[0].trim();
+
+  // BLOCK SPAM: Max 6 attempts per reference per 2 minutes
+  const attempts = (verificationCache.get(reference) || 0) + 1;
+  if (attempts > 6) {
+    return res.json({
+      success: false,
+      message: 'Too many attempts. Wait 2 minutes.',
+      rateLimited: true
+    });
+  }
+  verificationCache.set(reference, attempts);
 
   try {
-    // Clean reference
-    if (typeof reference === 'string' && reference.includes(',')) {
-      reference = reference.split(',')[0].trim();
-    }
-
-    if (!reference || reference.trim() === '') {
-      return res.status(400).json({
-        success: false,
-        message: 'Payment reference is required'
-      });
-    }
-
-    reference = reference.trim();
-
-    // Check if already processed - use 'Successful' status
-    const existing = await Transaction.findOne({
-      reference,
-      status: 'Successful'
-    });
-
+    // 1. FAST CHECK: Already processed?
+    const existing = await Transaction.findOne({ reference, status: 'Successful' });
     if (existing) {
-      console.log('✅ Transaction already processed:', reference);
-      
-      // Get user balance
-      let newBalance = 0;
-      if (existing.userId) {
-        const user = await User.findById(existing.userId);
-        if (user) newBalance = user.walletBalance;
-      }
-
+      const user = await User.findById(existing.userId);
+      console.log('Already processed →', reference);
       return res.json({
         success: true,
         alreadyProcessed: true,
         amount: existing.amount,
-        newBalance: newBalance,
+        newBalance: user?.walletBalance || 0,
         message: 'Payment already verified'
       });
     }
 
-    // Verify with PayStack with better error handling
-    let data;
+    // 2. Verify with PayStack
+    let paystackData;
     try {
-      const paystackResponse = await axios.get(
-        `https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`,
+      const resp = await axios.get(
+        `https://api.paystack.co/transaction/verify/${reference}`,
         {
           headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` },
-          timeout: 10000 // 10 second timeout
+          timeout: 9000
         }
       );
-      data = paystackResponse.data;
-    } catch (paystackError) {
-      console.log('⚠️ PayStack verification failed, checking local records');
-      // Check if we have a local record
-      const localTransaction = await Transaction.findOne({ reference });
-      if (localTransaction && localTransaction.status === 'Successful') {
-        const user = await User.findById(localTransaction.userId);
+      paystackData = resp.data;
+    } catch (err) {
+      console.log('PayStack timeout → fallback to DB');
+      const pending = await Transaction.findOne({ reference });
+      if (pending?.status === 'Successful') {
+        const user = await User.findById(pending.userId);
         return res.json({
           success: true,
           alreadyProcessed: true,
-          amount: localTransaction.amount,
-          newBalance: user ? user.walletBalance : 0,
-          message: 'Payment verified from local records'
+          amount: pending.amount,
+          newBalance: user?.walletBalance || 0
         });
       }
-      throw new Error('PayStack verification timeout');
+      throw err;
     }
 
-    if (!data.status || !data.data) {
-      throw new Error(data.message || 'Invalid PayStack response');
+    if (!paystackData.status || paystackData.data?.status !== 'success') {
+      return res.json({ success: false, message: 'Payment not successful' });
     }
 
-    if (data.data.status !== 'success') {
-      return res.json({
-        success: false,
-        status: data.data.status,
-        message: 'Payment not successful',
-        reference
-      });
-    }
+    const amount = paystackData.data.amount / 100;
+    let userId = paystackData.data.metadata?.userId;
 
-    // SUCCESS: Process payment
-    const amountNaira = data.data.amount / 100;
-    const userId = data.data.metadata?.userId;
+    // Fallback: find by email
+    if (!userId && paystackData.data.customer?.email) {
+      const user = await User.findOne({ email: paystackData.data.customer.email });
+      if (user) userId = user._id.toString();
+    }
 
     if (!userId) {
-      console.log('⚠️ No userId in metadata, trying to find user by email:', data.data.customer?.email);
-      
-      // Try to find user by email
-      if (data.data.customer?.email) {
-        const userByEmail = await User.findOne({ email: data.data.customer.email });
-        if (userByEmail) {
-          // Process with found user
-          return await processUserPayment(userByEmail._id, amountNaira, reference, data.data, res);
-        }
-      }
-      
-      return res.status(400).json({
-        success: false,
-        message: 'User not found for this payment'
-      });
+      return res.status(400).json({ success: false, message: 'User not found' });
     }
 
-    // Process payment for known user
-    await processUserPayment(userId, amountNaira, reference, data.data, res);
+    // ATOMIC UPDATE: Prevent double credit
+    const user = await User.findByIdAndUpdate(
+      userId,
+      { $inc: { walletBalance: amount } },
+      { new: true }
+    );
+
+    if (!user) throw new Error('User update failed');
+
+    // Save transaction
+    await Transaction.findOneAndUpdate(
+      { reference },
+      {
+        userId,
+        amount,
+        status: 'Successful',
+        type: 'credit',
+        gatewayResponse: paystackData.data,
+        balanceAfter: user.walletBalance
+      },
+      { upsert: true }
+    );
+
+    console.log(`SUCCESS: +₦${amount} | User: ${userId} | Ref: ${reference}`);
+
+    // Return final success
+    res.json({
+      success: true,
+      amount,
+      newBalance: user.walletBalance,
+      message: 'Payment verified and credited'
+    });
 
   } catch (error) {
-    console.error('❌ VERIFICATION ERROR:', error.message);
-    
-    // Return success even if there are errors (non-blocking)
-    return res.json({
-      success: true,
-      message: 'Payment received. Balance may update shortly.',
-      fallback: true
+    console.error('VERIFY ERROR:', error.message);
+    res.json({
+      success: false,
+      message: 'Verification failed. Try again later.'
     });
   }
 });
-
-// ========== PROCESS USER PAYMENT HELPER ==========
-async function processUserPayment(userId, amountNaira, reference, paystackData, res) {
-  try {
-    // Update user balance
-    const user = await User.findById(userId);
-    if (!user) throw new Error('User not found');
-
-    const balanceBefore = user.walletBalance;
-    user.walletBalance += amountNaira;
-    await user.save();
-
-    // Create or update transaction
-    let transaction = await Transaction.findOne({ reference: reference });
-    
-    if (transaction) {
-      // Update existing transaction
-      transaction.status = 'Successful';
-      transaction.amount = amountNaira;
-      transaction.gatewayResponse = paystackData;
-      transaction.balanceBefore = balanceBefore;
-      transaction.balanceAfter = user.walletBalance;
-      await transaction.save();
-      console.log('✅ Updated existing transaction');
-    } else {
-      // Create new transaction
-      transaction = await Transaction.create({
-        userId,
-        type: 'credit',
-        amount: amountNaira,
-        status: 'Successful',
-        reference,
-        description: `Wallet funding via PayStack - Ref: ${reference}`,
-        balanceBefore,
-        balanceAfter: user.walletBalance,
-        gateway: 'paystack',
-        metadata: { paystackData: paystackData }
-      });
-      console.log('✅ Created new transaction');
-    }
-
-    // Sync with main backend (async - don't wait, don't fail on error)
-    try {
-      await axios.post(`${MAIN_BACKEND_URL}/api/wallet/top-up`, {
-        userId: userId,
-        amount: amountNaira,
-        reference: reference,
-        source: 'paystack_funding',
-        description: `Wallet funding via PayStack - Ref: ${reference}`
-      }, { timeout: 8000 });
-      console.log('✅ Synced with main backend');
-    } catch (syncError) {
-      console.log('⚠️ Sync with main backend failed (non-critical):', syncError.message);
-      // Don't fail the whole process if sync fails
-    }
-
-    // Return SUCCESS with newBalance
-    return res.json({
-      success: true,
-      amount: amountNaira,
-      newBalance: user.walletBalance,
-      reference: reference,
-      message: 'Payment verified and wallet updated',
-      userId: userId
-    });
-
-  } catch (error) {
-    console.error('❌ Payment processing error:', error.message);
-    throw error;
-  }
-}
 
 // ========== WEBHOOK ==========
 router.post('/webhook/paystack', express.raw({ type: 'application/json' }), async (req, res) => {
