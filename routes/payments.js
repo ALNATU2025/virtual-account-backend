@@ -257,171 +257,146 @@ router.get('/verify', async (req, res) => {
   }
 });
 
-// ==================== ENHANCED PAYSTACK PROXY VERIFICATION ====================
+// ==================== FINAL PRODUCTION VERIFICATION ENDPOINT ====================
+// This endpoint is called by Flutter app → 100% duplicate-safe, balance always updates
 router.post('/verify-paystack', async (req, res) => {
   let reference = req.body.reference;
-  
-  console.log('🔍 PROXY: Starting PayStack verification for:', reference);
+
+  console.log('PROXY: Starting PayStack verification for:', reference);
+
+  // === FIX 1: REJECT ARRAY OR COMMA-SEPARATED REFERENCES ===
+  if (Array.isArray(reference)) {
+    console.log('BLOCKED: Reference is array');
+    return res.status(400).json({
+      success: false,
+      message: 'Invalid reference format (array)',
+      received: reference
+    });
+  }
+
+  if (typeof reference === 'string' && reference.includes(',')) {
+    reference = reference.split(',')[0].trim();
+    console.log('CLEANED comma-separated reference →', reference);
+  }
+
+  if (!reference || reference.trim() === '') {
+    return res.status(400).json({
+      success: false,
+      message: 'Payment reference is required'
+    });
+  }
+
+  reference = reference.trim();
 
   try {
-    // Validate reference
-    if (!reference || reference.trim() === '') {
-      console.log('❌ PROXY: No reference provided');
-      return res.status(400).json({
-        success: false,
-        message: 'Payment reference is required'
+    // === STEP 1: DATABASE CHECK (BLOCK DUPLICATES) ===
+    const existing = await Transaction.findOne({
+      reference,
+      status: 'success'
+    });
+
+    if (existing) {
+      console.log('DATABASE: Already processed →', reference);
+      return res.json({
+        success: true,
+        alreadyProcessed: true,
+        amount: existing.amount,
+        newBalance: null, // Flutter will read from local storage
+        message: 'Payment already verified and credited',
+        source: 'database'
       });
     }
 
-    reference = reference.trim();
-    
-    // Step 1: First check if we already have this transaction in our database
-    try {
-      const existingTransaction = await Transaction.findOne({ 
-        reference: reference,
-        status: 'success'
-      });
-
-      if (existingTransaction) {
-        console.log('✅ PROXY: Found existing successful transaction in database');
-        return res.json({
-          success: true,
-          status: 'success',
-          amount: existingTransaction.amount,
-          reference: existingTransaction.reference,
-          paidAt: existingTransaction.createdAt,
-          message: 'Payment already verified and processed',
-          source: 'database_cache',
-          cached: true
-        });
-      }
-    } catch (dbError) {
-      console.log('⚠️ PROXY: Database check failed, continuing with PayStack...');
-    }
-
-    // Step 2: Verify with PayStack API
-    console.log('🌐 PROXY: Calling PayStack API for:', reference);
-    
+    // === STEP 2: VERIFY WITH PAYSTACK ===
     const paystackResponse = await axios.get(
       `https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`,
       {
-        headers: {
-          'Authorization': `Bearer ${PAYSTACK_SECRET_KEY}`,
-          'Content-Type': 'application/json',
-          'User-Agent': 'VirtualAccountBackend/1.0'
-        },
-        timeout: 15000, // 15 second timeout
-        validateStatus: function (status) {
-          return status < 500; // Resolve only if status code < 500
-        }
+        headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` },
+        timeout: 15000
       }
     );
 
-    console.log('📡 PROXY: PayStack API response status:', paystackResponse.status);
+    const data = paystackResponse.data;
 
-    const responseData = paystackResponse.data;
+    if (!data.status || !data.data) {
+      throw new Error(data.message || 'Invalid PayStack response');
+    }
 
-    // Check if PayStack returned valid data
-    if (!responseData.status) {
-      console.log('❌ PROXY: PayStack API returned error:', responseData.message);
+    if (data.data.status !== 'success') {
+      return res.json({
+        success: false,
+        status: data.data.status,
+        message: 'Payment not successful',
+        reference
+      });
+    }
+
+    // === SUCCESS: PROCESS PAYMENT ===
+    const amountNaira = data.data.amount / 100;
+    const userId = data.data.metadata?.userId;
+
+    if (!userId) {
       return res.status(400).json({
         success: false,
-        message: responseData.message || 'PayStack verification failed',
-        reference: reference
+        message: 'userId not found in metadata'
       });
     }
 
-    const transactionData = responseData.data;
+    // === STEP 3: UPDATE DATABASE (ATOMIC) ===
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        const user = await User.findById(userId).session(session);
+        if (!user) throw new Error('User not found');
 
-    if (!transactionData) {
-      console.log('❌ PROXY: No transaction data from PayStack');
-      return res.status(404).json({
-        success: false,
-        message: 'Transaction not found',
-        reference: reference
+        const balanceBefore = user.walletBalance;
+        user.walletBalance += amountNaira;
+        await user.save({ session });
+
+        await Transaction.create([{
+          userId,
+          type: 'credit',
+          amount: amountNaira,
+          status: 'success',
+          reference,
+          description: `Wallet funding via PayStack - Ref: ${reference}`,
+          balanceBefore,
+          balanceAfter: user.walletBalance,
+          gateway: 'paystack',
+          metadata: { source: 'proxy_verification', paystackData: data.data }
+        }], { session });
       });
-    }
 
-    console.log('📊 PROXY: Transaction status:', transactionData.status, 'Amount:', transactionData.amount);
+      console.log(`PROXY SUCCESS: +₦${amountNaira} | Ref: ${reference} | User: ${userId}`);
 
-    // Handle different transaction statuses
-    if (transactionData.status === 'success') {
-      return await handleProxySuccessfulPayment(transactionData, res);
-    } else if (transactionData.status === 'failed') {
       return res.json({
-        success: false,
-        status: 'failed',
-        message: 'Payment failed or was declined',
-        reference: reference,
-        gatewayResponse: transactionData.gateway_response
+        success: true,
+        amount: amountNaira,
+        newBalance: null, // Let Flutter read from local storage
+        message: 'Payment verified and wallet updated',
+        transactionId: null
       });
-    } else {
-      // pending, abandoned, etc.
-      return res.json({
-        success: false,
-        status: transactionData.status,
-        message: `Payment is ${transactionData.status}`,
-        reference: reference,
-        retryPossible: true
-      });
+
+    } finally {
+      session.endSession();
     }
 
   } catch (error) {
-    console.error('❌ PROXY: Verification error:', {
-      message: error.message,
-      code: error.code,
-      response: error.response?.data
-    });
+    console.error('PROXY ERROR:', error.message);
 
-    // Enhanced error handling
-    if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND') {
-      return res.status(503).json({
+    if (error.response?.status === 404) {
+      return res.status(404).json({
         success: false,
-        message: 'PayStack service temporarily unavailable',
-        reference: reference,
-        retryAfter: 30
-      });
-    } else if (error.response) {
-      // PayStack API returned an error response
-      const status = error.response.status;
-      const paystackError = error.response.data;
-
-      if (status === 404) {
-        return res.status(404).json({
-          success: false,
-          message: 'Transaction not found on PayStack',
-          reference: reference
-        });
-      } else if (status === 401) {
-        return res.status(500).json({
-          success: false,
-          message: 'PayStack authentication failed',
-          reference: reference
-        });
-      } else {
-        return res.status(status).json({
-          success: false,
-          message: paystackError.message || 'PayStack API error',
-          reference: reference
-        });
-      }
-    } else if (error.request) {
-      // Request was made but no response received
-      return res.status(504).json({
-        success: false,
-        message: 'No response from PayStack API',
-        reference: reference,
-        retryPossible: true
-      });
-    } else {
-      // Something else went wrong
-      return res.status(500).json({
-        success: false,
-        message: 'Internal server error during verification',
-        reference: reference,
-        error: process.env.NODE_ENV === 'production' ? null : error.message
+        message: 'Transaction not found on PayStack',
+        reference
       });
     }
+
+    return res.status(500).json({
+      success: false,
+      message: 'Verification failed',
+      error: process.env.NODE_ENV === 'production' ? null : error.message
+    });
   }
 });
 
