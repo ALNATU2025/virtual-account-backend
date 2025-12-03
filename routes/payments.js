@@ -3,7 +3,8 @@ const router = express.Router();
 const axios = require('axios');
 const mongoose = require('mongoose');
 const NodeCache = require('node-cache');
-const rateLimitCache = new NodeCache({ stdTTL: 60, checkperiod: 120 }); // 1 minute cache
+const verificationCache = new NodeCache({ stdTTL: 120 }); // Only once!
+
 const Transaction = require('../models/Transaction');
 const User = require('../models/User');
 
@@ -228,11 +229,7 @@ router.get('/verify', async (req, res) => {
   }
 });
 
-// ========== POST VERIFICATION ENDPOINT (Used by Flutter) ==========
-// INSTALL FIRST: npm install node-cache
 
-const NodeCache = require('node-cache');
-const verificationCache = new NodeCache({ stdTTL: 120 }); // 2 minutes
 
 // ========== FINAL BULLETPROOF VERIFY ENDPOINT ==========
 router.post('/verify-paystack', async (req, res) => {
