@@ -1,9 +1,9 @@
 const express = require('express');
 const router = express.Router();
 const axios = require('axios');
-const mongoose = require('mongoose'); // Added missing import
+const mongoose = require('mongoose');
 const Transaction = require('../models/Transaction');
-const User = require('../models/User'); // Added missing import
+const User = require('../models/User');
 
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
 const MAIN_BACKEND_URL = process.env.MAIN_BACKEND_URL || 'https://vtpass-backend.onrender.com';
@@ -18,13 +18,11 @@ console.log('✅ Payments API initialized with secure configuration');
 
 // ==================== CORS MIDDLEWARE — FINAL WORKING VERSION ====================
 router.use((req, res, next) => {
-  // THIS IS ALL YOU NEED — ALLOWS MOBILE APPS, WEB, CAPACITOR, AND EVERYTHING
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Client-Platform, X-Request-ID, X-User-ID');
   res.header('Access-Control-Allow-Credentials', 'true');
 
-  // Handle preflight (OPTIONS) requests
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
@@ -60,11 +58,11 @@ router.post('/initialize-paystack', async (req, res) => {
       });
     }
 
-    // Generate proper PayStack reference (like: 100004251121121330145800078218)
+    // Generate proper PayStack reference
     const paystackReference = generatePaystackReference();
     console.log('📝 Generated PayStack reference:', paystackReference);
 
-    // Skip PIN verification in backend (handle in Flutter)
+    // Skip PIN verification in backend
     console.log('⏭️ Skipping PIN verification in backend');
 
     // Create transaction record
@@ -72,13 +70,13 @@ router.post('/initialize-paystack', async (req, res) => {
       userId,
       type: 'wallet_funding',
       amount: amount,
-      reference: paystackReference, // Use the proper reference
+      reference: paystackReference,
       status: 'pending',
       gateway: 'paystack',
       description: 'Wallet funding initialization',
       metadata: {
         source: 'payment_initialization',
-        userReference: reference, // Store the original reference
+        userReference: reference,
         hasPin: !!transactionPin,
         useBiometric: !!useBiometric,
         initializedAt: new Date()
@@ -87,15 +85,18 @@ router.post('/initialize-paystack', async (req, res) => {
 
     console.log('✅ Transaction record created');
 
-    // Initialize PayStack payment with proper reference
+    // FIXED: Remove duplicate reference parameter in callback URL
+    const callbackUrl = `https://virtual-account-backend.onrender.com/api/payments/verify?redirect=true&reference=${paystackReference}`;
+    
+    // Initialize PayStack payment
     const paystackPayload = {
       email: email,
-      amount: Math.round(amount * 100), // Convert to kobo
-      reference: paystackReference, // Use the proper reference
-      callback_url: `https://virtual-account-backend.onrender.com/api/payments/verify?redirect=true&reference=${paystackReference}`,
+      amount: Math.round(amount * 100),
+      reference: paystackReference,
+      callback_url: callbackUrl,
       metadata: { 
         userId: userId,
-        userReference: reference, // Include original reference
+        userReference: reference,
         timestamp: new Date().toISOString(),
         source: 'virtual_account_backend',
         transactionId: transaction._id.toString()
@@ -105,7 +106,8 @@ router.post('/initialize-paystack', async (req, res) => {
     console.log('📤 Sending to PayStack:', {
       email: paystackPayload.email,
       amount: paystackPayload.amount,
-      reference: paystackPayload.reference
+      reference: paystackPayload.reference,
+      callbackUrl: callbackUrl
     });
 
     const response = await axios.post(
@@ -130,7 +132,7 @@ router.post('/initialize-paystack', async (req, res) => {
     
     console.log('✅ PayStack initialization successful');
 
-    // Update transaction with PayStack response
+    // Update transaction
     await Transaction.findByIdAndUpdate(transaction._id, {
       gatewayResponse: paystackData,
       status: 'initialized',
@@ -147,11 +149,11 @@ router.post('/initialize-paystack', async (req, res) => {
     res.json({
       success: true,
       authorizationUrl: paystackData.authorization_url,
-      reference: paystackData.reference, // Return the proper reference
+      reference: paystackData.reference,
       accessCode: paystackData.access_code,
       message: 'Payment initialized successfully',
       transactionId: transaction._id,
-      userReference: reference // Include original reference for client
+      userReference: reference
     });
 
   } catch (error) {
@@ -175,20 +177,21 @@ router.post('/initialize-paystack', async (req, res) => {
   }
 });
 
-// Generate proper PayStack reference (like: 100004251121121330145800078218)
+// Generate PayStack reference
 function generatePaystackReference() {
   const timestamp = Date.now().toString();
   const random = Math.random().toString().substring(2, 15);
-  // Format: timestamp + random digits to make it 24 characters
   return (timestamp + random).substring(0, 24);
 }
 
 // ==================== PAYMENT VERIFICATION ====================
 router.get('/verify', async (req, res) => {
+  let { reference, trxref, redirect = 'true' } = req.query;
+  
+  console.log('🔄 VERIFY: Starting verification', { reference, trxref, redirect });
+
   try {
-    let { reference, trxref, redirect = 'true' } = req.query;
-    
-    // FINAL FIX: Clean PayStack's duplicate reference bug
+    // Clean PayStack's duplicate reference bug
     let paymentReference = reference || trxref || '';
     
     if (typeof paymentReference === 'string' && paymentReference.includes(',')) {
@@ -208,6 +211,8 @@ router.get('/verify', async (req, res) => {
       });
     }
 
+    console.log('🔍 Verifying with PayStack:', paymentReference);
+
     // Verify with PayStack
     const verifyResponse = await axios.get(
       `https://api.paystack.co/transaction/verify/${paymentReference}`,
@@ -225,6 +230,8 @@ router.get('/verify', async (req, res) => {
 
     const transactionData = data.data;
     
+    console.log('📊 PayStack response status:', transactionData.status);
+
     if (transactionData.status === 'success') {
       return await handleSuccessfulPayment(transactionData, paymentReference, redirect, res);
     } else if (transactionData.status === 'failed') {
@@ -236,8 +243,9 @@ router.get('/verify', async (req, res) => {
   } catch (error) {
     console.error('❌ VERIFICATION ERROR:', error.message);
     
-    // Store verification attempt for debugging
-    await storeVerificationAttempt(reference || trxref || '', error.message);
+    // FIXED: Use the query parameters instead of undefined variables
+    const ref = req.query.reference || req.query.trxref || '';
+    await storeVerificationAttempt(ref, error.message);
     
     if (req.query.redirect === 'true') {
       return res.redirect(`/api/payments/success?error=verification_failed&message=${encodeURIComponent(error.message)}`);
@@ -294,7 +302,7 @@ router.post('/verify-paystack', async (req, res) => {
         success: true,
         alreadyProcessed: true,
         amount: existing.amount,
-        newBalance: null, // Flutter will read from local storage
+        newBalance: null,
         message: 'Payment already verified and credited',
         source: 'database'
       });
@@ -365,7 +373,7 @@ router.post('/verify-paystack', async (req, res) => {
       return res.json({
         success: true,
         amount: amountNaira,
-        newBalance: null, // Let Flutter read from local storage
+        newBalance: null,
         message: 'Payment verified and wallet updated',
         transactionId: null
       });
@@ -393,6 +401,91 @@ router.post('/verify-paystack', async (req, res) => {
   }
 });
 
+// ==================== WEBHOOK HANDLER ====================
+// PayStack webhook for real-time payment notifications
+router.post('/webhook/paystack', express.raw({ type: 'application/json' }), async (req, res) => {
+  try {
+    console.log('PAYSTACK WEBHOOK RECEIVED');
+    
+    const signature = req.headers['x-paystack-signature'];
+    const body = req.body.toString();
+    
+    // Verify signature
+    const crypto = require('crypto');
+    const hash = crypto.createHmac('sha512', PAYSTACK_SECRET_KEY)
+      .update(body)
+      .digest('hex');
+    
+    if (hash !== signature) {
+      console.error('❌ Invalid webhook signature');
+      return res.status(400).send('Invalid signature');
+    }
+    
+    const event = JSON.parse(body);
+    console.log('WEBHOOK EVENT:', event.event);
+    
+    if (event.event === 'charge.success') {
+      const data = event.data;
+      const reference = data.reference;
+      const amount = data.amount / 100;
+      const userId = data.metadata?.userId;
+      
+      console.log('✅ WEBHOOK: Payment successful', {
+        reference,
+        amount,
+        userId
+      });
+      
+      // Check if already processed
+      const existing = await Transaction.findOne({
+        reference,
+        status: 'success'
+      });
+      
+      if (existing) {
+        console.log('✅ WEBHOOK: Already processed');
+        return res.sendStatus(200);
+      }
+      
+      // Update transaction
+      await Transaction.findOneAndUpdate(
+        { reference },
+        {
+          status: 'success',
+          gatewayResponse: data,
+          metadata: {
+            ...data.metadata,
+            webhookProcessed: true,
+            webhookTime: new Date()
+          }
+        },
+        { upsert: true, new: true }
+      );
+      
+      // Sync with main backend
+      if (userId) {
+        try {
+          await axios.post(`${MAIN_BACKEND_URL}/api/wallet/top-up`, {
+            userId,
+            amount,
+            reference,
+            source: 'paystack_webhook',
+            description: `Wallet funding via PayStack Webhook - Ref: ${reference}`
+          });
+          console.log('✅ WEBHOOK: Synced with main backend');
+        } catch (syncError) {
+          console.error('⚠️ WEBHOOK: Sync failed:', syncError.message);
+        }
+      }
+    }
+    
+    res.sendStatus(200);
+  } catch (error) {
+    console.error('❌ WEBHOOK ERROR:', error);
+    res.status(500).send('Webhook processing failed');
+  }
+});
+
 // ==================== PAYMENT SUCCESS REDIRECT HANDLER ====================
 router.get('/success', async (req, res) => {
   const { reference, error, status, amount } = req.query;
@@ -406,41 +499,44 @@ router.get('/success', async (req, res) => {
   });
 
   if (error || status === 'failed') {
-    // Failed payment — redirect to error page or show message
     console.log('❌ Redirect to failure page:', error);
     return res.redirect(`/api/payments/failure?reference=${reference || ''}&error=${error || 'unknown'}`);
   }
 
-  // SUCCESS: Extract clean reference (handle duplicates)
+  // SUCCESS: Extract clean reference
   let cleanRef = reference?.toString() || '';
   if (cleanRef.includes(',')) {
     cleanRef = cleanRef.split(',')[0].trim();
   }
 
-  // Verify the transaction (non-blocking — user sees success page)
+  // Verify the transaction in background
   verifyPaymentInBackground(cleanRef).catch(err => {
     console.error('Background verification failed:', err);
   });
 
-  // Show success page (HTML or redirect to Flutter deep link)
+  // Show success page
   if (req.headers['user-agent']?.includes('Flutter') || req.query.platform === 'mobile') {
-    // For mobile apps — redirect to your app's success scheme
     const mobileRedirect = `dalabapay://payment-success?ref=${cleanRef}&amount=${amount || 0}`;
     return res.redirect(mobileRedirect);
   }
 
-  // Web fallback: Simple success HTML
+  // Web fallback
   res.send(`
     <!DOCTYPE html>
     <html>
-    <head><title>Payment Successful</title></head>
+    <head>
+      <title>Payment Successful</title>
+      <meta http-equiv="refresh" content="3;url=dalabapay://payment-success?ref=${cleanRef}&amount=${amount || 0}">
+    </head>
     <body style="font-family: Arial; text-align: center; padding: 50px;">
       <h1>✅ Payment Successful!</h1>
       <p>Reference: <strong>${cleanRef}</strong></p>
       <p>Amount: ₦${amount || '0'}</p>
+      <p>Redirecting to app...</p>
       <script>
-        // Auto-redirect to your app or close window after 3s
-        setTimeout(() => { window.close(); }, 3000);
+        setTimeout(() => { 
+          window.location.href = 'dalabapay://payment-success?ref=${cleanRef}&amount=${amount || 0}';
+        }, 2000);
       </script>
     </body>
     </html>
@@ -458,7 +554,6 @@ router.get('/failure', async (req, res) => {
     return res.redirect(mobileRedirect);
   }
 
-  // Web fallback: Simple failure HTML
   res.send(`
     <!DOCTYPE html>
     <html>
@@ -478,14 +573,12 @@ async function verifyPaymentInBackground(reference) {
   try {
     console.log('🔍 Background verification for:', reference);
     
-    // Use internal verification
-    const transaction = await Transaction.findOne({ reference: reference });
-    if (transaction && transaction.status === 'success') {
-      console.log('✅ Background verification completed (already verified):', reference);
+    const existing = await Transaction.findOne({ reference, status: 'success' });
+    if (existing) {
+      console.log('✅ Already verified:', reference);
       return;
     }
     
-    // If not found, perform verification
     const verifyResponse = await axios.get(
       `https://api.paystack.co/transaction/verify/${reference}`,
       {
@@ -495,125 +588,23 @@ async function verifyPaymentInBackground(reference) {
     );
     
     if (verifyResponse.data.data?.status === 'success') {
-      console.log('✅ Background verification completed (verified now):', reference);
+      console.log('✅ Background verification completed:', reference);
+      
+      // Update transaction
+      const transaction = await Transaction.findOne({ reference });
+      if (transaction && transaction.status !== 'success') {
+        transaction.status = 'success';
+        transaction.gatewayResponse = verifyResponse.data.data;
+        await transaction.save();
+        console.log('✅ Updated transaction to success');
+      }
     }
   } catch (err) {
-    console.error('⚠️ Background verification failed (non-critical):', err.message);
-  }
-}
-
-// ==================== PROXY SUCCESS HANDLER ====================
-async function handleProxySuccessfulPayment(transactionData, res) {
-  try {
-    const amount = transactionData.amount / 100;
-    const reference = transactionData.reference;
-    const userId = extractUserId(transactionData);
-
-    console.log('✅ PROXY: Payment successful:', {
-      reference: reference,
-      amount: amount,
-      userId: userId
-    });
-
-    // Create or update transaction record
-    let transaction = await Transaction.findOne({ reference: reference });
-
-    if (transaction) {
-      if (transaction.status !== 'success') {
-        transaction.status = 'success';
-        transaction.amount = amount;
-        transaction.gatewayResponse = transactionData;
-        await transaction.save();
-        console.log('✅ PROXY: Updated existing transaction to success');
-      }
-    } else {
-      transaction = await Transaction.create({
-        userId: userId,
-        type: 'wallet_funding',
-        amount: amount,
-        reference: reference,
-        status: 'success',
-        gateway: 'paystack',
-        gatewayResponse: transactionData,
-        description: 'Wallet funding via PayStack proxy',
-        metadata: {
-          paystackData: transactionData,
-          source: 'proxy_verification',
-          verifiedAt: new Date()
-        }
-      });
-      console.log('✅ PROXY: Created new transaction record');
-    }
-
-    // Sync with main backend (non-blocking)
-    if (userId) {
-      syncWithMainBackend(userId, amount, reference)
-        .then(syncResult => {
-          console.log('✅ PROXY: Main backend sync completed');
-        })
-        .catch(syncError => {
-          console.error('⚠️ PROXY: Main backend sync failed:', syncError.message);
-          // Don't fail the verification if sync fails
-        });
-    }
-
-    // Return success response immediately
-    res.json({
-      success: true,
-      status: 'success',
-      amount: amount,
-      reference: reference,
-      paidAt: transactionData.paid_at,
-      message: 'Payment verified successfully!',
-      source: 'paystack_proxy',
-      userId: userId,
-      transactionId: transaction._id
-    });
-
-  } catch (processingError) {
-    console.error('❌ PROXY: Error processing successful payment:', processingError);
-    
-    // Even if processing fails, return success if PayStack verified it
-    res.json({
-      success: true,
-      status: 'success',
-      amount: transactionData.amount / 100,
-      reference: transactionData.reference,
-      paidAt: transactionData.paid_at,
-      message: 'Payment verified (processing incomplete)',
-      source: 'paystack_proxy_direct',
-      warning: 'Some post-processing failed'
-    });
+    console.error('⚠️ Background verification failed:', err.message);
   }
 }
 
 // ==================== HELPER FUNCTIONS ====================
-
-// Verify transaction PIN with main backend
-async function verifyTransactionPin(userId, transactionPin) {
-  try {
-    console.log(`🔐 Verifying transaction PIN for user: ${userId}`);
-    
-    const response = await axios.post(
-      `${MAIN_BACKEND_URL}/api/users/verify-transaction-pin`,
-      {
-        userId: userId,
-        transactionPin: transactionPin
-      },
-      {
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        timeout: 10000
-      }
-    );
-
-    return response.data;
-  } catch (error) {
-    console.error('❌ PIN verification error:', error.response?.data || error.message);
-    throw new Error(error.response?.data?.message || 'PIN verification failed');
-  }
-}
 
 // Handle successful payment
 async function handleSuccessfulPayment(data, paymentReference, redirect, res) {
@@ -636,7 +627,6 @@ async function handleSuccessfulPayment(data, paymentReference, redirect, res) {
   
   if (transaction) {
     if (transaction.status !== 'success') {
-      // Update existing transaction
       transaction.status = 'success';
       transaction.amount = amount;
       transaction.gatewayResponse = data;
@@ -646,7 +636,6 @@ async function handleSuccessfulPayment(data, paymentReference, redirect, res) {
       console.log('ℹ️ Transaction already processed:', paymentReference);
     }
   } else {
-    // Create new transaction
     transaction = await Transaction.create({
       userId,
       type: 'wallet_funding',
@@ -666,21 +655,38 @@ async function handleSuccessfulPayment(data, paymentReference, redirect, res) {
   }
 
   // Sync with main backend
-  const syncResult = await syncWithMainBackend(userId, amount, paymentReference);
+  try {
+    const syncResult = await syncWithMainBackend(userId, amount, paymentReference);
+    
+    if (redirect === 'true') {
+      return res.redirect(`/api/payments/success?reference=${paymentReference}&amount=${amount}&status=success`);
+    }
 
-  if (redirect === 'true') {
-    return res.redirect(`/api/payments/success?reference=${paymentReference}&amount=${amount}&status=success`);
+    res.json({
+      success: true,
+      message: 'Payment verified successfully',
+      amount: amount,
+      reference: paymentReference,
+      newBalance: syncResult.newBalance,
+      transactionId: transaction._id,
+      userId: userId
+    });
+  } catch (syncError) {
+    console.error('❌ Sync error:', syncError.message);
+    
+    if (redirect === 'true') {
+      return res.redirect(`/api/payments/success?reference=${paymentReference}&amount=${amount}&status=success&sync=failed`);
+    }
+    
+    res.json({
+      success: true,
+      message: 'Payment verified but sync failed',
+      amount: amount,
+      reference: paymentReference,
+      warning: 'Wallet update may be delayed',
+      transactionId: transaction._id
+    });
   }
-
-  res.json({
-    success: true,
-    message: 'Payment verified successfully',
-    amount: amount,
-    reference: paymentReference,
-    newBalance: syncResult.newBalance,
-    transactionId: transaction._id,
-    userId: userId
-  });
 }
 
 // Handle failed payment
@@ -688,7 +694,6 @@ async function handleFailedPayment(data, paymentReference, redirect, res) {
   const amount = data.amount / 100;
   const userId = extractUserId(data);
 
-  // Update or create failed transaction
   let transaction = await Transaction.findOne({ reference: paymentReference });
   
   if (transaction) {
@@ -732,7 +737,6 @@ async function handlePendingPayment(data, paymentReference, redirect, res) {
   const amount = data.amount / 100;
   const userId = extractUserId(data);
 
-  // Update or create pending transaction
   let transaction = await Transaction.findOne({ reference: paymentReference });
   
   if (transaction) {
@@ -825,7 +829,6 @@ async function syncWithMainBackend(userId, amount, reference) {
       console.error(`❌ Sync attempt ${retries} failed:`, errorMessage);
 
       if (status === 429) {
-        // Rate limiting - wait and retry
         const waitTime = retries * 2000;
         console.warn(`⏳ Rate limited. Waiting ${waitTime}ms before retry...`);
         await new Promise(resolve => setTimeout(resolve, waitTime));
@@ -833,7 +836,6 @@ async function syncWithMainBackend(userId, amount, reference) {
         console.error('❌ Main backend endpoint not found:', url);
         break;
       } else if (status >= 500) {
-        // Server error - retry
         if (retries < maxRetries) {
           const waitTime = retries * 1000;
           console.warn(`⏳ Server error. Waiting ${waitTime}ms before retry...`);
@@ -842,7 +844,6 @@ async function syncWithMainBackend(userId, amount, reference) {
         }
         break;
       } else {
-        // Client error - don't retry
         break;
       }
     }
@@ -888,6 +889,8 @@ async function storeVerificationAttempt(reference, error) {
       error: error,
       attemptedAt: new Date()
     });
+    
+    console.log('📝 Stored verification attempt:', reference);
   } catch (storageError) {
     console.error('❌ Failed to store verification attempt:', storageError.message);
   }
@@ -906,15 +909,16 @@ router.get('/health', (req, res) => {
   });
 });
 
-// Test endpoint to check configuration
+// Test endpoint
 router.get('/test', (req, res) => {
   res.json({
     success: true,
-    message: 'Payments API is active and properly configured',
+    message: 'Payments API is active',
     endpoints: [
-      'POST /api/payments/initialize - Payment initialization (CORS enabled)',
+      'POST /api/payments/initialize-paystack - Payment initialization',
       'GET /api/payments/verify - Payment verification',
       'POST /api/payments/verify-paystack - Proxy verification',
+      'POST /api/payments/webhook/paystack - Webhook handler',
       'GET /api/payments/health - Health check'
     ],
     environment: process.env.NODE_ENV || 'development',
