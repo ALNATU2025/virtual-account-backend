@@ -237,13 +237,12 @@ router.post('/verify-paystack', async (req, res) => {
 
   console.log('POST /verify-paystack →', reference);
 
-  if (!reference) 
+  if (!reference)
     return res.status(400).json({ success: false, message: 'Invalid reference' });
 
-  if (reference.includes(',')) 
+  if (reference.includes(','))
     reference = reference.split(',')[0].trim();
 
-  // Allow only valid Paystack references
   const validRefPattern = /^10000[0-9]{8,}$/;
   if (!validRefPattern.test(reference)) {
     console.log("❌ Invalid reference blocked:", reference);
@@ -253,37 +252,44 @@ router.post('/verify-paystack', async (req, res) => {
     });
   }
 
-  // RATE LIMIT – prevent spam & loops
-  const attempts = (verificationCache.get(reference) || 0) + 1;
-  if (attempts > 6) {
-    return res.json({
-      success: false,
-      message: 'Too many attempts. Wait 2 minutes.',
-      rateLimited: true
-    });
-  }
-  verificationCache.set(reference, attempts);
-
   try {
-    // 1. Already processed?
+    // ======================================================
+    // ✅ 1. FIRST: Return success immediately if already processed
+    // ======================================================
     const existing = await Transaction.findOne({ reference, status: 'Successful' });
+
     if (existing) {
       const user = await User.findById(existing.userId);
 
-      console.log('Already processed →', reference);
+      console.log('🟢 Already processed →', reference);
 
       return res.json({
-        success: false,
+        success: true,        // << IMPORTANT: not false
         alreadyProcessed: true,
         amount: existing.amount,
         balanceBefore: existing.balanceBefore,
         balanceAfter: existing.balanceAfter,
-        newBalance: user?.walletBalance || 0,
-        message: 'This transaction was already verified earlier.'
+        newBalance: user?.walletBalance || existing.balanceAfter,
+        message: 'Transaction already verified.'
       });
     }
 
-    // 2. Verify with PayStack
+    // ======================================================
+    // ✅ 2. RATE LIMIT — runs ONLY if NOT already processed
+    // ======================================================
+    const attempts = (verificationCache.get(reference) || 0) + 1;
+    if (attempts > 6) {
+      return res.json({
+        success: false,
+        message: 'Too many attempts. Wait 2 minutes.',
+        rateLimited: true
+      });
+    }
+    verificationCache.set(reference, attempts);
+
+    // ======================================================
+    // 3. Verify with Paystack (only if not processed yet)
+    // ======================================================
     let paystackData;
     try {
       const resp = await axios.get(
@@ -296,20 +302,6 @@ router.post('/verify-paystack', async (req, res) => {
       paystackData = resp.data;
     } catch (err) {
       console.log('⚠️ PayStack timeout → fallback to DB');
-
-      const pending = await Transaction.findOne({ reference });
-      if (pending?.status === 'Successful') {
-        const user = await User.findById(pending.userId);
-        return res.json({
-          success: false,
-          alreadyProcessed: true,
-          amount: pending.amount,
-          balanceBefore: pending.balanceBefore,
-          balanceAfter: pending.balanceAfter,
-          newBalance: user?.walletBalance || 0,
-          message: 'This transaction was already verified earlier.'
-        });
-      }
       throw err;
     }
 
@@ -318,9 +310,9 @@ router.post('/verify-paystack', async (req, res) => {
     }
 
     const amount = paystackData.data.amount / 100;
+
     let userId = paystackData.data.metadata?.userId;
 
-    // fallback: locate user by email
     if (!userId && paystackData.data.customer?.email) {
       const user = await User.findOne({ email: paystackData.data.customer.email });
       if (user) userId = user._id.toString();
@@ -330,11 +322,12 @@ router.post('/verify-paystack', async (req, res) => {
       return res.status(400).json({ success: false, message: 'User not found' });
     }
 
-    // ---- FIX: Capture balance BEFORE credit ----
+    // ======================================================
+    // 4. Credit wallet
+    // ======================================================
     const userBefore = await User.findById(userId);
     const balanceBefore = userBefore.walletBalance;
 
-    // ---- Credit user ----
     const userAfter = await User.findByIdAndUpdate(
       userId,
       { $inc: { walletBalance: amount } },
@@ -343,7 +336,9 @@ router.post('/verify-paystack', async (req, res) => {
 
     if (!userAfter) throw new Error('User update failed');
 
-    // ---- Save Transaction with balanceBefore & balanceAfter ----
+    // ======================================================
+    // 5. Save transaction
+    // ======================================================
     await Transaction.findOneAndUpdate(
       { reference },
       {
@@ -361,6 +356,9 @@ router.post('/verify-paystack', async (req, res) => {
 
     console.log(`SUCCESS: +₦${amount} | User: ${userId} | Ref: ${reference}`);
 
+    // ======================================================
+    // 6. Respond OK
+    // ======================================================
     res.json({
       success: true,
       amount,
