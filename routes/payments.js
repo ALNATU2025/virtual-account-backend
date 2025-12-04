@@ -383,56 +383,76 @@ router.post('/verify-paystack', async (req, res) => {
 router.post('/webhook/paystack', express.raw({ type: 'application/json' }), async (req, res) => {
   try {
     const event = JSON.parse(req.body.toString());
-    
-    if (event.event === 'charge.success') {
-      const data = event.data;
-      const reference = data.reference;
-      const amount = data.amount / 100;
-      let userId = data.metadata?.userId;
-      
-      console.log('📩 Webhook received for:', reference);
-      
-      // If no userId, try to find user by email
-      if (!userId && data.customer?.email) {
-        const user = await User.findOne({ email: data.customer.email });
-        if (user) {
-          userId = user._id;
-          console.log(`✅ Found user by email: ${data.customer.email}`);
-        }
-      }
-      
-      // Update user if exists
-      if (userId) {
-        await User.findByIdAndUpdate(userId, {
-          $inc: { walletBalance: amount }
-        });
-        
-        // Create or update transaction
-        await Transaction.findOneAndUpdate(
-          { reference: reference },
-          {
-            userId,
-            type: 'credit',
-            amount: amount,
-            status: 'Successful',
-            description: `Wallet funding via PayStack Webhook`,
-            gateway: 'paystack'
-          },
-          { upsert: true }
-        );
-        
-        console.log(`✅ Webhook processed: User ${userId} +₦${amount}`);
-      } else {
-        console.log('⚠️ Webhook: No user found for payment');
-      }
+
+    // Only handle successful charge
+    if (event.event !== 'charge.success') {
+      return res.sendStatus(200);
     }
-    
-    res.sendStatus(200);
+
+    const data = event.data;
+    const reference = data.reference;
+    const amount = data.amount / 100;
+
+    console.log("📩 Webhook received:", reference);
+
+    // 1. Prevent double processing
+    const existing = await Transaction.findOne({ reference, status: "Successful" });
+    if (existing) {
+      console.log("⛔ Already processed webhook:", reference);
+      return res.sendStatus(200);
+    }
+
+    // 2. Get user
+    let userId = data.metadata?.userId;
+
+    // fallback using email
+    if (!userId && data.customer?.email) {
+      const user = await User.findOne({ email: data.customer.email });
+      if (user) userId = user._id;
+    }
+
+    if (!userId) {
+      console.log("❌ No user found for webhook");
+      return res.sendStatus(200);
+    }
+
+    // 3. Capture BALANCE BEFORE
+    const userBefore = await User.findById(userId);
+    const balanceBefore = userBefore.walletBalance;
+
+    // 4. Credit wallet
+    const userAfter = await User.findByIdAndUpdate(
+      userId,
+      { $inc: { walletBalance: amount } },
+      { new: true }
+    );
+
+    // 5. Save transaction
+    await Transaction.findOneAndUpdate(
+      { reference },
+      {
+        userId,
+        amount,
+        type: "credit",
+        status: "Successful",
+        description: "Wallet funding via Paystack Webhook",
+        balanceBefore,
+        balanceAfter: userAfter.walletBalance,
+        details: data
+      },
+      { upsert: true }
+    );
+
+    console.log(`✅ Wallet credited: ₦${amount} | Before: ₦${balanceBefore} → After: ₦${userAfter.walletBalance}`);
+
+    return res.sendStatus(200);
+
   } catch (error) {
-    console.error('Webhook error:', error);
-    res.status(500).send('Webhook failed');
+    console.error("🔥 WEBHOOK ERROR:", error);
+    return res.sendStatus(500);
   }
 });
+
 
 // ========== HEALTH CHECK ==========
 router.get('/health', (req, res) => {
