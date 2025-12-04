@@ -237,11 +237,10 @@ router.post('/verify-paystack', async (req, res) => {
 
   console.log('POST /verify-paystack →', reference);
 
-  // Clean junk references
   if (!reference) return res.status(400).json({ success: false, message: 'Invalid reference' });
   if (reference.includes(',')) reference = reference.split(',')[0].trim();
 
-  // BLOCK SPAM: Max 6 attempts per reference per 2 minutes
+  // BLOCK SPAM
   const attempts = (verificationCache.get(reference) || 0) + 1;
   if (attempts > 6) {
     return res.json({
@@ -253,17 +252,19 @@ router.post('/verify-paystack', async (req, res) => {
   verificationCache.set(reference, attempts);
 
   try {
-    // 1. FAST CHECK: Already processed?
+    // 1. Already processed?
     const existing = await Transaction.findOne({ reference, status: 'Successful' });
     if (existing) {
       const user = await User.findById(existing.userId);
       console.log('Already processed →', reference);
+
+      // ❌ FIX: success MUST be FALSE so Flutter does not double-credit
       return res.json({
-        success: true,
+        success: false,
         alreadyProcessed: true,
         amount: existing.amount,
         newBalance: user?.walletBalance || 0,
-        message: 'Payment already verified'
+        message: 'This transaction was already verified earlier.'
       });
     }
 
@@ -283,11 +284,13 @@ router.post('/verify-paystack', async (req, res) => {
       const pending = await Transaction.findOne({ reference });
       if (pending?.status === 'Successful') {
         const user = await User.findById(pending.userId);
+
         return res.json({
-          success: true,
+          success: false, // ❌ FIX HERE TOO
           alreadyProcessed: true,
           amount: pending.amount,
-          newBalance: user?.walletBalance || 0
+          newBalance: user?.walletBalance || 0,
+          message: 'This transaction was already verified earlier.'
         });
       }
       throw err;
@@ -300,7 +303,6 @@ router.post('/verify-paystack', async (req, res) => {
     const amount = paystackData.data.amount / 100;
     let userId = paystackData.data.metadata?.userId;
 
-    // Fallback: find by email
     if (!userId && paystackData.data.customer?.email) {
       const user = await User.findOne({ email: paystackData.data.customer.email });
       if (user) userId = user._id.toString();
@@ -310,7 +312,7 @@ router.post('/verify-paystack', async (req, res) => {
       return res.status(400).json({ success: false, message: 'User not found' });
     }
 
-    // ATOMIC UPDATE: Prevent double credit
+    // Prevent double credit
     const user = await User.findByIdAndUpdate(
       userId,
       { $inc: { walletBalance: amount } },
@@ -335,7 +337,6 @@ router.post('/verify-paystack', async (req, res) => {
 
     console.log(`SUCCESS: +₦${amount} | User: ${userId} | Ref: ${reference}`);
 
-    // Return final success
     res.json({
       success: true,
       amount,
