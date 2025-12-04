@@ -6,7 +6,9 @@ const transactionSchema = new mongoose.Schema({
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',
         required: true,
+        index: true
     },
+
     type: {
         type: String,
         enum: [
@@ -18,74 +20,85 @@ const transactionSchema = new mongoose.Schema({
             'CashWithdraw', 
             'FundWallet', 
             'wallet_funding',
-            'virtual_account_topup',      // ← NEW: For automatic deposits
-            'virtual_account_deposit',    // ← Optional extra name
-            'credit',                     // ← For sync compatibility
+            'virtual_account_topup',
+            'virtual_account_deposit',
+            'credit',
             'debit'
         ],
         required: true,
+        index: true
     },
+
     amount: {
         type: Number,
-        required: true,
+        required: true
     },
+
     status: {
-    type: String,
-    enum: ['Successful', 'Pending', 'Failed', 'Completed'],  // ← 'Completed' added to enum
-    set: (v) => {
-      if (!v) return 'Pending';
-      const normalized = v.toString().trim().toLowerCase();
-      if (normalized === 'successful' || normalized === 'success') {
-        return 'Successful';
-      }
-      if (normalized === 'completed' || normalized === 'complete') {
-        return 'Completed';
-      }
-      // Capitalize first letter for any other value
-      return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+        type: String,
+        enum: ['Successful', 'Pending', 'Failed', 'Completed'],
+        set: (v) => {
+            if (!v) return 'Pending';
+            const n = v.toString().trim().toLowerCase();
+
+            if (['successful', 'success'].includes(n)) return 'Successful';
+            if (['completed', 'complete'].includes(n)) return 'Completed';
+            if (['failed', 'fail'].includes(n)) return 'Failed';
+
+            return n.charAt(0).toUpperCase() + n.slice(1);
+        },
+        default: 'Pending',
+        index: true
     },
-    default: 'Pending',
-},
+
     transactionId: {
         type: String,
         unique: true,
-        sparse: true,        // ← THIS ALLOWS null/undefined while keeping uniqueness
-        default: null        // ← No longer required
-        // You can auto-generate it in the controller if you want
+        sparse: true,
+        default: null
     },
-    reference: {             // ← ADD THIS: PayStack reference (very useful!)
+
+    reference: {
         type: String,
         unique: true,
-        sparse: true
+        sparse: true,
+        index: true
     },
-    description: {           // ← Optional but nice to have
+
+    description: {
         type: String,
         default: ''
     },
+
     balanceBefore: {
-    type: Number,
-    default: 0
+        type: Number,
+        default: 0
     },
+
     balanceAfter: {
-    type: Number,
-    default: 0
+        type: Number,
+        default: 0
     },
-    
+
     details: {
         type: mongoose.Schema.Types.Mixed,
         default: {}
-    },
+    }
+
 }, { timestamps: true });
 
-// Optional: Auto-generate transactionId if not provided
+
+// 💡 Generate transactionId ONLY if missing
 transactionSchema.pre('save', function(next) {
     if (!this.transactionId) {
-        this.transactionId = `TXN_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`.toUpperCase();
-    }
-    if (this.reference && !this.transactionId) {
-        this.transactionId = this.reference; // fallback
+        this.transactionId = `TXN_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`.toUpperCase();
     }
     next();
 });
 
-module.exports = mongoose.models.Transaction || mongoose.model('Transaction', transactionSchema);
+// Performance indexes
+transactionSchema.index({ userId: 1, createdAt: -1 });
+
+module.exports =
+  mongoose.models.Transaction ||
+  mongoose.model('Transaction', transactionSchema);
