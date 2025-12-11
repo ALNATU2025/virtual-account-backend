@@ -17,8 +17,10 @@ const metadataSchema = new mongoose.Schema({
     exchangeReference: { type: String, default: '' },
     vtpassResponse: { type: mongoose.Schema.Types.Mixed, default: {} },
     
-    // NEW: Paystack specific data
+    // Paystack specific data
     paystackData: { type: mongoose.Schema.Types.Mixed, default: {} },
+    
+    // FIXED: Only ONE verificationHistory field
     verificationHistory: [{
         method: { type: String, enum: ['polling', 'webhook', 'callback', 'manual'] },
         timestamp: { type: Date, default: Date.now },
