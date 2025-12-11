@@ -20,7 +20,7 @@ const metadataSchema = new mongoose.Schema({
     // Paystack specific data
     paystackData: { type: mongoose.Schema.Types.Mixed, default: {} },
     
-    // FIXED: Only ONE verificationHistory field
+    // CORRECT: Array type for verificationHistory
     verificationHistory: [{
         method: { type: String, enum: ['polling', 'webhook', 'callback', 'manual'] },
         timestamp: { type: Date, default: Date.now },
@@ -51,7 +51,8 @@ const transactionSchema = new mongoose.Schema({
             'Commission Credit',
             'Commission Withdrawal',
             'debit',
-            'credit'
+            'credit',
+            'wallet_funding' // ADD THIS to match your backend code
         ],
         required: true
     },
