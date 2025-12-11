@@ -29,10 +29,10 @@ router.post('/initialize-paystack', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Missing parameters' });
     }
 
-    // Create transaction with pending status
+    // Create transaction with pending status - FIXED: ADDED COMMA
     const transaction = await Transaction.create({
       userId,
-      type: 'Wallet Funding'
+      type: 'Wallet Funding',  // <-- ADDED COMMA HERE
       amount: amount,
       reference: reference,
       status: 'Pending',
@@ -229,8 +229,6 @@ router.get('/verify', async (req, res) => {
   }
 });
 
-
-
 // ========== FINAL BULLETPROOF VERIFY ENDPOINT (FIXED - NO verificationHistory ERROR) ==========
 router.post('/verify-paystack', async (req, res) => {
   let reference = req.body.reference?.toString().trim();
@@ -425,7 +423,6 @@ router.post('/verify-paystack', async (req, res) => {
   }
 });
 
-
 // ========== WEBHOOK ==========
 router.post('/webhook/paystack', express.raw({ type: 'application/json' }), async (req, res) => {
   try {
@@ -499,7 +496,6 @@ router.post('/webhook/paystack', express.raw({ type: 'application/json' }), asyn
     return res.sendStatus(500);
   }
 });
-
 
 // ========== HEALTH CHECK ==========
 router.get('/health', (req, res) => {
