@@ -32,7 +32,7 @@ router.post('/initialize-paystack', async (req, res) => {
     // Create transaction with pending status
     const transaction = await Transaction.create({
       userId,
-      type: 'wallet_funding',
+      type: 'Wallet Funding'
       amount: amount,
       reference: reference,
       status: 'Pending',
