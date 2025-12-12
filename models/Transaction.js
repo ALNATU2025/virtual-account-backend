@@ -36,26 +36,28 @@ const transactionSchema = new mongoose.Schema({
         required: true,
         index: true
     },
-    type: {
-        type: String,
-        enum: [
-            'Airtime Purchase',
-            'Data Purchase',
-            'Cable TV Subscription',
-            'Electricity Payment',
-            'Education Payment',
-            'Insurance Purchase',
-            'Wallet Funding',
-            'Transfer Sent',
-            'Transfer Received',
-            'Commission Credit',
-            'Commission Withdrawal',
-            'debit',
-            'credit',
-            'wallet_funding' // ADD THIS to match your backend code
-        ],
-        required: true
-    },
+   type: {
+    type: String,
+    enum: [
+        'Airtime Purchase',
+        'Data Purchase',
+        'Cable TV Subscription',
+        'Electricity Payment',
+        'Education Payment',
+        'Insurance Purchase',
+        'Wallet Funding',
+        'Transfer Sent',
+        'Transfer Received',
+        'Commission Credit',
+        'Commission Withdrawal',
+        'debit',
+        'credit',
+        'wallet_funding',
+        'virtual_account_topup'   // ✅ Added correctly
+    ],
+    required: true
+},
+
     amount: { type: Number, required: true, min: 0 },
     status: {
         type: String,
