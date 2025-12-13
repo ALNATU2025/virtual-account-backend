@@ -235,9 +235,7 @@ router.post('/verify-paystack', async (req, res) => {
 
   console.log('POST /verify-paystack →', reference);
 
-  // ========== ADD THIS CHECK ==========
-  // If reference starts with '10000', it's a virtual account payment
-  // and should ONLY be handled by webhook, not API verification
+  // ========== VIRTUAL ACCOUNT CHECK ==========
   if (reference && reference.startsWith('10000')) {
     console.log('⏩ Skipping virtual account verification - webhook handles this');
     return res.json({
@@ -246,7 +244,27 @@ router.post('/verify-paystack', async (req, res) => {
       skipVerification: true
     });
   }
-  // ========== END OF ADDED CHECK ==========
+
+  // ========== ADD THIS NEW CHECK ==========
+  // Skip references that look like old/invalid PayStack references
+  if (reference && (
+    reference.startsWith('176') ||  // Old timestamp-based references
+    reference.length < 10 ||        // Too short
+    reference.length > 50           // Too long
+  )) {
+    console.log('⏩ Skipping old/invalid reference:', reference);
+    return res.json({
+      success: false,
+      message: 'Invalid or expired transaction reference',
+      shouldStopPolling: true  // Frontend should stop polling this
+    });
+  }
+  // ========== END OF NEW CHECK ==========
+
+  if (!reference)
+    return res.status(400).json({ success: false, message: 'Invalid reference' });
+
+  // ... rest of your code ...
 
 
   if (!reference)
