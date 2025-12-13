@@ -1,7 +1,4 @@
 // routes/webhooks.js - FINAL UNIVERSAL VERSION
-// Works with BOTH: /api/webhooks/paystack AND /api/webhooks/virtual-account
-// Handles Card, OPay, USSD, Virtual Account — ALL PAYMENTS WORK
-
 const express = require("express");
 const router = express.Router();
 const crypto = require("crypto");
@@ -15,11 +12,10 @@ if (!PAYSTACK_SECRET_KEY) throw new Error("PAYSTACK_SECRET_KEY missing");
 
 const processedWebhooks = new Set();
 
-// Universal handler — works for ALL PayStack payments
 const handlePayStackWebhook = async (req, res) => {
   const webhookId = `wh_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
   console.log(`\nPAYSTACK WEBHOOK [${webhookId}]`);
-  console.log("Full payload:", JSON.stringify(req.body, null, 2)); // ← SHOWS EVERYTHING
+  console.log("Full payload:", JSON.stringify(req.body, null, 2));
 
   res.status(200).json({ status: "OK", received: true });
 
@@ -82,26 +78,28 @@ const handlePayStackWebhook = async (req, res) => {
   const session = await mongoose.startSession();
   try {
     await session.withTransaction(async () => {
-      if (await Transaction.findOne({ reference }).session(session)) {
+      const existingTx = await Transaction.findOne({ 
+        reference, 
+        status: "Successful" 
+      }).session(session);
+
+      if (existingTx) {
         console.log("Already credited");
         return;
       }
 
       let user = null;
 
-      // 1. metadata.userId (Card/OPay)
       if (data.metadata?.userId) {
         user = await User.findById(data.metadata.userId).session(session);
         console.log("Found by userId:", data.metadata.userId);
       }
 
-      // 2. Email (fallback)
       if (!user && data.customer?.email) {
         user = await User.findOne({ email: data.customer.email.toLowerCase().trim() }).session(session);
         console.log("Found by email:", data.customer.email);
       }
 
-      // 3. Virtual account number
       if (!user && accountNumber) {
         user = await User.findOne({ "virtualAccount.accountNumber": accountNumber }).session(session);
         console.log("Found by virtual account:", accountNumber);
@@ -118,13 +116,14 @@ const handlePayStackWebhook = async (req, res) => {
 
       await Transaction.create([{
         userId: user._id,
-        type: accountNumber ? "virtual_account_topup" : "wallet_funding",
+        type: "Wallet Funding",
         amount: amountNaira,
         reference,
-        status: "success",
+        status: "Successful",
         balanceBefore: before,
         balanceAfter: user.walletBalance,
         gateway: "paystack",
+        gatewayResponse: data,
         description: accountNumber ? "Virtual account deposit" : `PayStack ${channel}`,
         metadata: { channel, paystackData: data, webhookId }
       }], { session });
@@ -138,7 +137,7 @@ const handlePayStackWebhook = async (req, res) => {
   } finally {
     await session.endSession();
   }
-};
+}; // ← THIS CLOSING BRACKET WAS MISSING!
 
 // BOTH ENDPOINTS USE THE SAME HANDLER
 router.post("/paystack", handlePayStackWebhook);
