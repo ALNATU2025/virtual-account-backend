@@ -235,6 +235,20 @@ router.post('/verify-paystack', async (req, res) => {
 
   console.log('POST /verify-paystack →', reference);
 
+  // ========== ADD THIS CHECK ==========
+  // If reference starts with '10000', it's a virtual account payment
+  // and should ONLY be handled by webhook, not API verification
+  if (reference && reference.startsWith('10000')) {
+    console.log('⏩ Skipping virtual account verification - webhook handles this');
+    return res.json({
+      success: true,
+      message: 'Virtual account payments are processed via webhook only',
+      skipVerification: true
+    });
+  }
+  // ========== END OF ADDED CHECK ==========
+
+
   if (!reference)
     return res.status(400).json({ success: false, message: 'Invalid reference' });
 
