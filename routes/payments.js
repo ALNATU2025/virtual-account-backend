@@ -29,15 +29,19 @@ router.post('/initialize-paystack', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Missing parameters' });
     }
 
-    // Create transaction with pending status - FIXED: ADDED COMMA
-    const transaction = await Transaction.create({
-      userId,
-      type: 'Wallet Funding',  // <-- ADDED COMMA HERE
-      amount: amount,
-      reference: reference,
-      status: 'Pending',
-      description: 'Wallet funding initialization'
-    });
+  // Create transaction with pending status
+const transaction = await Transaction.create({
+  userId,
+  type: 'Wallet Funding',
+  amount: amount,
+  reference: reference,
+  status: 'Pending',
+  description: 'Wallet funding initialization',
+  gateway: 'paystack',
+  gatewayReference: reference,
+  balanceBefore: 0,
+  balanceAfter: 0
+});
 
     // Initialize with PayStack
     const paystackPayload = {
@@ -70,10 +74,12 @@ router.post('/initialize-paystack', async (req, res) => {
     const paystackData = response.data.data;
     
     // Update transaction
-    await Transaction.findByIdAndUpdate(transaction._id, {
-      gatewayResponse: paystackData,
-      status: 'Pending'
-    });
+   // Update transaction
+await Transaction.findByIdAndUpdate(transaction._id, {
+  gatewayResponse: paystackData,
+  gatewayReference: paystackData.reference,
+  status: 'Pending'
+});
 
     // Return success
     res.json({
@@ -162,19 +168,35 @@ router.get('/verify', async (req, res) => {
     const transactionData = data.data;
     
     // Update transaction without duplicate error - silent fail
-    try {
-      await Transaction.findOneAndUpdate(
-        { reference: paymentReference },
-        {
-          status: transactionData.status === 'success' ? 'Successful' : 'Failed',
-          gatewayResponse: transactionData,
-          updatedAt: new Date()
-        },
-        { upsert: false }
-      );
-    } catch (err) {
-      // Silent fail - transaction already exists
-    }
+   // Update transaction with proper schema format
+try {
+  await Transaction.findOneAndUpdate(
+    { reference: paymentReference },
+    {
+      $set: {
+        status: transactionData.status === 'success' ? 'Successful' : 'Failed',
+        gatewayResponse: transactionData,
+        gatewayReference: paymentReference,
+        gateway: 'paystack',
+        updatedAt: new Date()
+      },
+      $push: {
+        'metadata.verificationHistory': {
+          method: 'callback',
+          timestamp: new Date(),
+          status: transactionData.status,
+          response: { 
+            source: 'paystack_callback',
+            receivedAt: new Date() 
+          }
+        }
+      }
+    },
+    { upsert: true }  // Changed from false to true
+  );
+} catch (err) {
+  console.log('⚠️ Transaction update error:', err.message);
+}
     
     // Create HTML page
     const deepLink = `dalabapay://payment-callback?ref=${paymentReference}&status=${transactionData.status}&amount=${transactionData.amount / 100}`;
@@ -235,43 +257,14 @@ router.post('/verify-paystack', async (req, res) => {
 
   console.log('POST /verify-paystack →', reference);
 
-  // ========== VIRTUAL ACCOUNT CHECK ==========
-  if (reference && reference.startsWith('10000')) {
-    console.log('⏩ Skipping virtual account verification - webhook handles this');
-    return res.json({
-      success: true,
-      message: 'Virtual account payments are processed via webhook only',
-      skipVerification: true
-    });
+  if (!reference) {
+    return res.status(400).json({ success: false, message: 'Invalid reference' });
   }
 
-  // ========== ADD THIS NEW CHECK ==========
-  // Skip references that look like old/invalid PayStack references
-  if (reference && (
-    reference.startsWith('176') ||  // Old timestamp-based references
-    reference.length < 10 ||        // Too short
-    reference.length > 50           // Too long
-  )) {
-    console.log('⏩ Skipping old/invalid reference:', reference);
-    return res.json({
-      success: false,
-      message: 'Invalid or expired transaction reference',
-      shouldStopPolling: true  // Frontend should stop polling this
-    });
+  // Clean reference if Paystack sends it duplicated
+  if (reference.includes(',')) {
+    reference = reference.split(',')[0].trim();
   }
-  // ========== END OF NEW CHECK ==========
-
-  if (!reference)
-    return res.status(400).json({ success: false, message: 'Invalid reference' });
-
-  // ... rest of your code ...
-
-
-  if (!reference)
-    return res.status(400).json({ success: false, message: 'Invalid reference' });
-
- if (reference.includes(','))
-  reference = reference.split(',')[0].trim(); // <-- This works!
 
   // Enhanced rate limiting
   const now = Date.now();
@@ -312,7 +305,7 @@ router.post('/verify-paystack', async (req, res) => {
     }
 
     // ======================================================
-    // 2. VERIFY WITH PAYSTACK
+    // 2. VERIFY WITH PAYSTACK (ALL TRANSACTIONS NOW!)
     // ======================================================
     let paystackData;
     try {
@@ -336,28 +329,50 @@ router.post('/verify-paystack', async (req, res) => {
       });
     }
 
-    if (!paystackData.status || paystackData.data?.status !== 'success') {
+    // Check if Paystack returned a valid response
+    if (!paystackData.status) {
       return res.json({ 
         success: false, 
-        message: 'Payment not successful on PayStack',
-        gatewayStatus: paystackData.data?.status,
-        shouldRetry: paystackData.data?.status === 'pending'
+        message: 'Invalid transaction reference or PayStack error',
+        shouldStopPolling: true
       });
     }
 
-    const amount = paystackData.data.amount / 100;
+    const transactionData = paystackData.data;
+    
+    // Handle different Paystack statuses
+    if (transactionData.status !== 'success') {
+      // Update transaction status to failed if it exists
+      await Transaction.findOneAndUpdate(
+        { reference: reference },
+        {
+          status: 'Failed',
+          gatewayResponse: transactionData,
+          updatedAt: new Date()
+        },
+        { upsert: true }
+      );
+      
+      return res.json({ 
+        success: false, 
+        message: `Payment ${transactionData.status} on PayStack`,
+        gatewayStatus: transactionData.status,
+        shouldRetry: transactionData.status === 'pending'
+      });
+    }
+
+    const amount = transactionData.amount / 100;
     console.log(`💰 Verified amount: ₦${amount}`);
 
     // ======================================================
     // 3. IDENTIFY USER
     // ======================================================
-    let userId = paystackData.data.metadata?.userId?.toString();
+    let userId = transactionData.metadata?.userId?.toString();
 
     // Fallback 1: Check customer email
-    if (!userId && paystackData.data.customer?.email) {
-      // ✅ BETTER (add .lean() for better performance)
+    if (!userId && transactionData.customer?.email) {
       const userByEmail = await User.findOne({ 
-        email: paystackData.data.customer.email 
+        email: transactionData.customer.email 
       }).select('_id').lean();
       if (userByEmail) userId = userByEmail._id.toString();
     }
@@ -373,128 +388,168 @@ router.post('/verify-paystack', async (req, res) => {
 
     if (!userId) {
       console.log('❌ Cannot identify user for reference:', reference);
+      // Create failed transaction record
+      await Transaction.findOneAndUpdate(
+        { reference: reference },
+        {
+          status: 'Failed',
+          gatewayResponse: transactionData,
+          description: 'User not found for transaction',
+          updatedAt: new Date()
+        },
+        { upsert: true }
+      );
+      
       return res.status(400).json({ 
         success: false, 
         message: 'User not found. Please contact support.',
-        reference: reference
+        reference: reference,
+        shouldStopPolling: true
       });
     }
 
     // ======================================================
-    // 4. ATOMIC TRANSACTION (MongoDB Session)
+    // 4. CONCURRENCY LOCK - CRITICAL FIX!
     // ======================================================
-    const session = await mongoose.startSession();
-    
+    const lockKey = `lock:${reference}`;
+    if (verificationCache.get(lockKey)) {
+      console.log(`⏳ Lock exists for ${reference}. Another process is handling it.`);
+      return res.json({
+        success: false,
+        message: 'Transaction is being processed. Please wait.',
+        retryable: true
+      });
+    }
+    verificationCache.set(lockKey, true, 30); // Lock for 30 seconds
+
     try {
-      session.startTransaction();
+      // ======================================================
+      // 5. ATOMIC TRANSACTION (MongoDB Session)
+      // ======================================================
+      const session = await mongoose.startSession();
       
-      // 4a. Get user WITH LOCK
-      const user = await User.findById(userId).session(session);
-      if (!user) {
-        throw new Error(`User ${userId} not found`);
+      try {
+        session.startTransaction();
+        
+        // 5a. Get user WITH LOCK
+        const user = await User.findById(userId).session(session);
+        if (!user) {
+          throw new Error(`User ${userId} not found`);
+        }
+
+        // Initialize wallet balance if undefined
+        if (user.walletBalance === undefined || user.walletBalance === null) {
+          user.walletBalance = 0;
+        }
+
+        const balanceBefore = user.walletBalance;
+        const balanceAfter = balanceBefore + amount;
+
+        // 5b. Update user balance
+        user.walletBalance = balanceAfter;
+        await user.save({ session });
+
+        console.log(`💰 User balance: ₦${balanceBefore} → ₦${balanceAfter}`);
+
+      // 5c. Prepare transaction update - FIXED FOR YOUR MODEL
+const transactionUpdate = {
+  $set: {
+    userId: userId,
+    amount: amount,
+    status: 'Successful',
+    type: 'Wallet Funding',
+    description: `Wallet funding via PayStack - ${reference}`,
+    balanceBefore: balanceBefore,
+    balanceAfter: balanceAfter,
+    gatewayResponse: transactionData,
+    gatewayReference: reference,
+    gateway: 'paystack',
+    updatedAt: new Date()
+  },
+  $setOnInsert: {
+    reference: reference,
+    createdAt: new Date(),
+    // MUST match your model format: TXN_timestamp_randomString
+    transactionId: `TXN_${Date.now()}_${Math.random().toString(36).substr(2, 9).toUpperCase()}`
+  },
+  // Correct way to push to verificationHistory array in metadata
+  $push: {
+    'metadata.verificationHistory': {
+      method: 'polling',
+      timestamp: new Date(),
+      status: 'success',
+      response: { 
+        source: 'paystack_verification',
+        verifiedAt: new Date(),
+        amount: amount 
       }
+    }
+  }
+};
+        // 5d. Upsert transaction
+        await Transaction.findOneAndUpdate(
+          { reference: reference },
+          transactionUpdate,
+          { 
+            upsert: true,
+            session: session,
+            new: true
+          }
+        );
 
-      // Initialize wallet balance if undefined
-      if (user.walletBalance === undefined || user.walletBalance === null) {
-        user.walletBalance = 0;
-      }
+        // 5e. Commit transaction
+        await session.commitTransaction();
+        
+        console.log(`✅ ATOMIC SUCCESS: User ${userId} credited ₦${amount}`);
 
-      const balanceBefore = user.walletBalance;
-      const balanceAfter = balanceBefore + amount;
+        // ======================================================
+        // 6. SYNC TO MAIN BACKEND (non-blocking)
+        // ======================================================
+        try {
+          await axios.post(
+            `${MAIN_BACKEND_URL}/api/transactions/sync-payment`,
+            {
+              userId: userId,
+              amount: amount,
+              reference: reference,
+              type: 'Wallet Funding',
+              status: 'Successful',
+              balanceBefore: balanceBefore,
+              balanceAfter: balanceAfter,
+              source: 'virtual_account_backend'
+            },
+            { timeout: 5000 }
+          );
+          console.log('📡 Synced to main backend');
+        } catch (syncError) {
+          console.log('⚠️ Main backend sync failed (non-critical):', syncError.message);
+        }
 
-      // 4b. Update user balance
-      user.walletBalance = balanceAfter;
-      await user.save({ session });
-
-      console.log(`💰 User balance: ₦${balanceBefore} → ₦${balanceAfter}`);
-
-      // 4c. Prepare transaction update
-      const transactionUpdate = {
-        $set: {
-          userId: userId,
+        // ======================================================
+        // 7. SUCCESS RESPONSE
+        // ======================================================
+        res.json({
+          success: true,
           amount: amount,
-          status: 'Successful',
-          type: 'Wallet Funding',
-          description: `Wallet funding via PayStack - ${reference}`,
           balanceBefore: balanceBefore,
           balanceAfter: balanceAfter,
-          gatewayResponse: paystackData.data,
-          updatedAt: new Date(),
-          metadata: {
-            verificationHistory: [{
-              method: 'api_verification',
-              timestamp: new Date(),
-              status: 'success',
-              source: 'paystack'
-            }]
-          }
-        },
-        $setOnInsert: {
+          newBalance: balanceAfter,
+          userId: userId,
           reference: reference,
-          createdAt: new Date(),
-          transactionId: `TXN${Date.now()}${Math.random().toString(36).substr(2, 4).toUpperCase()}`
-        }
-      };
+          message: '✅ Payment verified and wallet credited successfully!'
+        });
 
-      // 4d. Upsert transaction
-      await Transaction.findOneAndUpdate(
-        { reference: reference },
-        transactionUpdate,
-        { 
-          upsert: true,
-          session: session,
-          new: true
-        }
-      );
-
-      // 4e. Commit transaction
-      await session.commitTransaction();
-      
-      console.log(`✅ ATOMIC SUCCESS: User ${userId} credited ₦${amount}`);
-
-      // ======================================================
-      // 5. SYNC TO MAIN BACKEND (non-blocking)
-      // ======================================================
-      try {
-        await axios.post(
-          `${MAIN_BACKEND_URL}/api/transactions/sync-payment`,
-          {
-            userId: userId,
-            amount: amount,
-            reference: reference,
-            type: 'Wallet Funding',
-            status: 'Successful',
-            balanceBefore: balanceBefore,
-            balanceAfter: balanceAfter,
-            source: 'virtual_account_backend'
-          },
-          { timeout: 5000 }
-        );
-        console.log('📡 Synced to main backend');
-      } catch (syncError) {
-        console.log('⚠️ Main backend sync failed (non-critical):', syncError.message);
+      } catch (transactionError) {
+        // Rollback on any error
+        await session.abortTransaction();
+        throw transactionError;
+      } finally {
+        session.endSession();
       }
 
-      // ======================================================
-      // 6. SUCCESS RESPONSE
-      // ======================================================
-      res.json({
-        success: true,
-        amount: amount,
-        balanceBefore: balanceBefore,
-        balanceAfter: balanceAfter,
-        newBalance: balanceAfter,
-        userId: userId,
-        reference: reference,
-        message: '✅ Payment verified and wallet credited successfully!'
-      });
-
-    } catch (transactionError) {
-      // Rollback on any error
-      await session.abortTransaction();
-      throw transactionError;
     } finally {
-      session.endSession();
+      // Always release the lock
+      verificationCache.del(lockKey);
     }
 
   } catch (error) {
@@ -503,11 +558,14 @@ router.post('/verify-paystack', async (req, res) => {
     
     // User-friendly error messages
     let errorMessage = 'Payment verification failed. Please try again.';
+    let shouldStopPolling = false;
     
     if (error.message.includes('duplicate key')) {
       errorMessage = 'Transaction already processed. Please refresh your balance.';
+      shouldStopPolling = true;
     } else if (error.message.includes('User not found')) {
       errorMessage = 'Account not found. Please contact support.';
+      shouldStopPolling = true;
     } else if (error.message.includes('timeout')) {
       errorMessage = 'Verification timeout. Please check your payment status.';
     }
@@ -516,12 +574,11 @@ router.post('/verify-paystack', async (req, res) => {
       success: false,
       message: errorMessage,
       reference: reference,
+      shouldStopPolling: shouldStopPolling,
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
-
-
 
 
 // ========== MANUAL RECOVERY ENDPOINT ==========
@@ -629,9 +686,10 @@ router.post('/recover-zero-balance', async (req, res) => {
 
 
 
-
-// ========== WEBHOOK ==========
+// ========== COMPLETE WEBHOOK (FIXED) ==========
 router.post('/webhook/paystack', express.raw({ type: 'application/json' }), async (req, res) => {
+  let session;
+  
   try {
     const event = JSON.parse(req.body.toString());
 
@@ -646,72 +704,133 @@ router.post('/webhook/paystack', express.raw({ type: 'application/json' }), asyn
 
     console.log("📩 Webhook received:", reference);
 
-    // 1. Prevent double processing
-    const existing = await Transaction.findOne({ reference, status: "Successful" });
-    if (existing) {
-      console.log("⛔ Already processed webhook:", reference);
+    // ========== CONCURRENCY LOCK ==========
+    const lockKey = `lock:${reference}`;
+    if (verificationCache.get(lockKey)) {
+      console.log(`⏳ Webhook: Lock exists for ${reference}. Skipping.`);
       return res.sendStatus(200);
     }
+    verificationCache.set(lockKey, true, 30);
 
-    // 2. Get user
-    let userId = data.metadata?.userId;
+    try {
+      // 1. Check if already processed
+      const existing = await Transaction.findOne({ reference, status: "Successful" });
+      if (existing) {
+        console.log("⛔ Already processed webhook:", reference);
+        return res.sendStatus(200);
+      }
 
-    // fallback using email
-    if (!userId && data.customer?.email) {
-      const user = await User.findOne({ email: data.customer.email });
-      if (user) userId = user._id;
-    }
+      // 2. Get user
+      let userId = data.metadata?.userId;
 
-    if (!userId) {
-      console.log("❌ No user found for webhook");
+      // Fallback using email
+      if (!userId && data.customer?.email) {
+        const user = await User.findOne({ email: data.customer.email });
+        if (user) userId = user._id;
+      }
+
+      if (!userId) {
+        console.log("❌ No user found for webhook");
+        return res.sendStatus(200);
+      }
+
+      // 3. ATOMIC TRANSACTION
+      session = await mongoose.startSession();
+      session.startTransaction();
+
+      // 4. Get user WITH LOCK
+      const user = await User.findById(userId).session(session);
+      if (!user) {
+        throw new Error(`User ${userId} not found`);
+      }
+
+      // Initialize wallet balance if undefined
+      if (user.walletBalance === undefined || user.walletBalance === null) {
+        user.walletBalance = 0;
+      }
+
+      const balanceBefore = user.walletBalance;
+      const balanceAfter = balanceBefore + amount;
+
+      // 5. Update user balance
+      user.walletBalance = balanceAfter;
+      await user.save({ session });
+
+      // 6. Save transaction (matches your model schema)
+      const transactionUpdate = {
+        $set: {
+          userId: userId,
+          amount: amount,
+          status: 'Successful',
+          type: 'Wallet Funding',
+          description: "Wallet funding via Paystack Webhook",
+          balanceBefore: balanceBefore,
+          balanceAfter: balanceAfter,
+          gatewayResponse: data,
+          gatewayReference: reference,
+          gateway: 'paystack',
+          updatedAt: new Date()
+        },
+        $setOnInsert: {
+          reference: reference,
+          createdAt: new Date(),
+          // MUST match your model format
+          transactionId: `TXN_${Date.now()}_${Math.random().toString(36).substr(2, 9).toUpperCase()}`
+        },
+        // Correct way to push to verificationHistory
+        $push: {
+          'metadata.verificationHistory': {
+            method: 'webhook',
+            timestamp: new Date(),
+            status: 'success',
+            response: { 
+              source: 'paystack_webhook',
+              receivedAt: new Date(),
+              amount: amount 
+            }
+          }
+        }
+      };
+
+      await Transaction.findOneAndUpdate(
+        { reference: reference },
+        transactionUpdate,
+        { 
+          upsert: true,
+          session: session,
+          new: true
+        }
+      );
+
+      // 7. Commit
+      await session.commitTransaction();
+      
+      console.log(`✅ Webhook: User ${userId} credited ₦${amount} | Before: ₦${balanceBefore} → After: ₦${balanceAfter}`);
+
       return res.sendStatus(200);
+
+    } catch (error) {
+      // Rollback on error
+      if (session) {
+        await session.abortTransaction();
+      }
+      console.error("🔥 WEBHOOK PROCESSING ERROR:", error.message);
+      // Don't return 500 - PayStack will retry
+      return res.sendStatus(200);
+    } finally {
+      if (session) {
+        session.endSession();
+      }
+      // Always release the lock
+      verificationCache.del(lockKey);
     }
-
-    // 3. Capture BALANCE BEFORE
-    const userBefore = await User.findById(userId);
-    const balanceBefore = userBefore.walletBalance;
-
-    // 4. Credit wallet
-    const userAfter = await User.findByIdAndUpdate(
-      userId,
-      { $inc: { walletBalance: amount } },
-      { new: true }
-    );
-
-    // 5. Save transaction
-    await Transaction.findOneAndUpdate(
-      { reference },
-      {
-        userId,
-        amount,
-        type: "credit",
-        status: "Successful",
-        description: "Wallet funding via Paystack Webhook",
-        balanceBefore,
-        balanceAfter: userAfter.walletBalance,
-        details: data
-      },
-      { upsert: true }
-    );
-
-    console.log(`✅ Wallet credited: ₦${amount} | Before: ₦${balanceBefore} → After: ₦${userAfter.walletBalance}`);
-
-    return res.sendStatus(200);
 
   } catch (error) {
-    console.error("🔥 WEBHOOK ERROR:", error);
+    console.error("🔥 WEBHOOK PARSING ERROR:", error);
     return res.sendStatus(500);
   }
 });
 
-// ========== HEALTH CHECK ==========
-router.get('/health', (req, res) => {
-  res.json({ 
-    success: true, 
-    message: 'Payments API healthy',
-    timestamp: new Date().toISOString()
-  });
-});
 
 // ========== GET TRANSACTION STATUS ==========
 router.get('/status/:reference', async (req, res) => {
