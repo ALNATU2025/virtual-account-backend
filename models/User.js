@@ -69,7 +69,7 @@ const userSchema = mongoose.Schema(
       default: 0.0,
     },
     
-    // Authentication fields
+       // Authentication fields
     refreshToken: {
       type: String,
       default: null,
@@ -79,6 +79,15 @@ const userSchema = mongoose.Schema(
       default: null,
     },
     resetPasswordExpire: {
+      type: Date,
+      default: null,
+    },
+    // OTP fields for password reset
+    resetPasswordOTP: {
+      type: String,
+      default: null,
+    },
+    resetPasswordOTPExpire: {
       type: Date,
       default: null,
     },
