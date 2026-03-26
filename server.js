@@ -1,4 +1,4 @@
-// server.js - Updated with Cashwyre Integration
+// server.js - COMPLETE WORKING VERSION for NGN currency
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -8,17 +8,17 @@ require('dotenv').config();
 
 const app = express();
 
-// Cashwyre Configuration
+// Cashwyre Configuration for NGN
 const CASHWYRE_CONFIG = {
   baseURL: 'https://businessapi.cashwyre.com/api/v1.0',
   businessCode: 'C4B20260307000114',
   appId: 'C4B20260307000114',
   secretKey: 'secK_0cc3f3c57217673eb0581ba428b4d375d43d991d636303ac9c563ea8b6db2d873fb80586f448578090a1e7495b86f61423cb91121d9e957e6c9751933b3f2f9e',
-  currency: 'SLE',
-  country: 'SL'
+  currency: 'NGN',
+  country: 'NG'
 };
 
-// ==================== 1. RAW BODY MIDDLEWARE ====================
+// ==================== RAW BODY MIDDLEWARE ====================
 app.use((req, res, next) => {
   if (req.originalUrl.startsWith('/api/webhooks')) {
     let data = [];
@@ -32,25 +32,20 @@ app.use((req, res, next) => {
   }
 });
 
-// ==================== 2. MOUNT WEBHOOK ROUTES ====================
-const webhookRoutes = require('./routes/webhooks')(CASHWYRE_CONFIG);
-app.use('/api/webhooks', webhookRoutes);
-
-// ==================== 3. CORS & PARSERS ====================
+// ==================== CORS ====================
 app.use(cors({ origin: true, credentials: true }));
 app.options('*', cors());
 
+// ==================== JSON PARSER ====================
 app.use((req, res, next) => {
   if (req.rawBody) {
     return next();
   }
   express.json({ limit: '10mb' })(req, res, next);
 });
-
 app.use(express.urlencoded({ extended: true }));
 
-// ==================== 4. MODELS ====================
-
+// ==================== MONGODB MODELS ====================
 const UserSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true },
   fullName: { type: String, required: true },
@@ -61,7 +56,6 @@ const UserSchema = new mongoose.Schema({
   transactionPinSet: { type: Boolean, default: false },
   isActive: { type: Boolean, default: true },
   role: { type: String, default: 'user' },
-  cashwyreCustomerId: { type: String },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
 });
@@ -73,12 +67,12 @@ const TransactionSchema = new mongoose.Schema({
   previousBalance: { type: Number, required: true },
   newBalance: { type: Number, required: true },
   reference: { type: String, required: true, unique: true },
-  status: { type: String, enum: ['pending', 'completed', 'failed'], default: 'pending' },
+  status: { type: String, enum: ['pending', 'completed', 'failed'], default: 'completed' },
   description: { type: String },
   metadata: { type: mongoose.Schema.Types.Mixed },
   serviceCharge: { type: Number, default: 0 },
   cashwyreReference: { type: String },
-  completedAt: { type: Date }
+  completedAt: { type: Date, default: Date.now }
 });
 
 const VirtualAccountSchema = new mongoose.Schema({
@@ -87,7 +81,7 @@ const VirtualAccountSchema = new mongoose.Schema({
   accountName: { type: String, required: true },
   bankName: { type: String, required: true },
   bankCode: { type: String, required: true },
-  currency: { type: String, default: 'SLE' },
+  currency: { type: String, default: 'NGN' },
   amount: { type: Number, required: true },
   totalPayable: { type: Number, required: true },
   fee: { type: Number, required: true },
@@ -102,8 +96,7 @@ const User = mongoose.model('User', UserSchema);
 const Transaction = mongoose.model('Transaction', TransactionSchema);
 const VirtualAccount = mongoose.model('VirtualAccount', VirtualAccountSchema);
 
-// ==================== 5. HELPER FUNCTIONS ====================
-
+// ==================== HELPER FUNCTIONS ====================
 const generateRequestId = () => {
   return `${Date.now()}${crypto.randomBytes(4).toString('hex')}`;
 };
@@ -116,29 +109,24 @@ const calculateServiceCharge = (amount) => {
   }
 };
 
-// Cashwyre API Call Helper
+// Cashwyre API Call
 const cashwyreApiCall = async (endpoint, data) => {
-  try {
-    const response = await axios.post(
-      `${CASHWYRE_CONFIG.baseURL}${endpoint}`,
-      data,
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${CASHWYRE_CONFIG.secretKey}`,
-          'Accept': 'application/json'
-        },
-        timeout: 30000
-      }
-    );
-    return response.data;
-  } catch (error) {
-    console.error('Cashwyre API Error:', error.response?.data || error.message);
-    throw new Error(error.response?.data?.message || error.message);
-  }
+  const response = await axios.post(
+    `${CASHWYRE_CONFIG.baseURL}${endpoint}`,
+    data,
+    {
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${CASHWYRE_CONFIG.secretKey}`,
+        'Accept': 'application/json'
+      },
+      timeout: 30000
+    }
+  );
+  return response.data;
 };
 
-// Create Dynamic Virtual Account via Cashwyre
+// Create Dynamic Virtual Account
 const createDynamicAccount = async (userId, amount) => {
   const requestId = generateRequestId();
   
@@ -186,46 +174,6 @@ const createDynamicAccount = async (userId, amount) => {
       }
     };
   }
-  
-  return result;
-};
-
-// Initiate Payin (for mobile money)
-const initiatePayin = async (userId, amount, bankCode, accountNumber, accountName) => {
-  const requestId = generateRequestId();
-  const transactionReference = generateRequestId();
-  
-  const payload = {
-    appId: CASHWYRE_CONFIG.appId,
-    requestId: requestId,
-    amount: amount,
-    currency: CASHWYRE_CONFIG.currency,
-    businessCode: CASHWYRE_CONFIG.businessCode,
-    bankCode: bankCode,
-    country: CASHWYRE_CONFIG.country,
-    accountNumber: accountNumber,
-    accountName: accountName
-  };
-  
-  const result = await cashwyreApiCall('/payin/initiatePayin', payload);
-  
-  if (result.success) {
-    return {
-      success: true,
-      data: {
-        reference: result.data.reference,
-        transactionReference: transactionReference,
-        accountNumber: result.data.accountNumber,
-        accountName: result.data.accountName,
-        bankCode: result.data.bankCode,
-        bankName: result.data.bankName,
-        depositAmount: result.data.depositAmount,
-        feeAmount: result.data.feeAmount,
-        canConfirmPayin: result.data.canConfirmPayin
-      }
-    };
-  }
-  
   return result;
 };
 
@@ -273,8 +221,9 @@ const updateWalletBalance = async (userId, amount, type, reference, description,
     
     await transaction.save({ session });
     
+    // Record service charge separately for admin
     if (serviceCharge > 0) {
-      const serviceChargeTransaction = new Transaction({
+      const serviceChargeTx = new Transaction({
         userId,
         type: 'commission',
         amount: serviceCharge,
@@ -282,12 +231,12 @@ const updateWalletBalance = async (userId, amount, type, reference, description,
         newBalance: serviceCharge,
         reference: `${reference}_SERVICE_CHARGE`,
         status: 'completed',
-        description: `Service charge for ${reference}`,
+        description: `Service charge for ₦${amount} deposit`,
         metadata: { originalTransaction: reference, originalAmount: amount },
         serviceCharge: serviceCharge,
         completedAt: new Date()
       });
-      await serviceChargeTransaction.save({ session });
+      await serviceChargeTx.save({ session });
     }
     
     await session.commitTransaction();
@@ -295,7 +244,8 @@ const updateWalletBalance = async (userId, amount, type, reference, description,
     return {
       success: true,
       newBalance,
-      transaction: { id: transaction._id, reference, amount, serviceCharge }
+      serviceCharge,
+      transaction: { id: transaction._id, reference, amount }
     };
   } catch (error) {
     await session.abortTransaction();
@@ -305,7 +255,7 @@ const updateWalletBalance = async (userId, amount, type, reference, description,
   }
 };
 
-// ==================== 6. API ENDPOINTS ====================
+// ==================== API ENDPOINTS ====================
 
 // Health check
 app.get('/health', (req, res) => res.json({ status: 'OK', service: 'Cashwyre Wallet' }));
@@ -314,89 +264,13 @@ app.get('/health', (req, res) => res.json({ status: 'OK', service: 'Cashwyre Wal
 app.post('/api/virtual-accounts/create-dynamic', async (req, res) => {
   try {
     const { userId, amount } = req.body;
-    
     if (!userId) return res.status(400).json({ success: false, message: 'User ID required' });
-    if (!amount || amount < 100) return res.status(400).json({ success: false, message: 'Minimum amount is 100 SLE' });
+    if (!amount || amount < 100) return res.status(400).json({ success: false, message: 'Minimum amount is ₦100' });
     
     const result = await createDynamicAccount(userId, amount);
     res.json(result);
   } catch (error) {
-    console.error('Create dynamic account error:', error.message);
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-// Initiate payin (mobile money)
-app.post('/api/payments/initiate-payin', async (req, res) => {
-  try {
-    const { userId, amount, bankCode, accountNumber, accountName } = req.body;
-    
-    if (!userId || !amount) {
-      return res.status(400).json({ success: false, message: 'User ID and amount required' });
-    }
-    
-    const result = await initiatePayin(userId, amount, bankCode, accountNumber, accountName);
-    res.json(result);
-  } catch (error) {
-    console.error('Initiate payin error:', error.message);
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-// Confirm payin
-app.post('/api/payments/confirm-payin', async (req, res) => {
-  try {
-    const { requestId, transactionReference, reference } = req.body;
-    
-    if (!requestId || !transactionReference || !reference) {
-      return res.status(400).json({ success: false, message: 'Missing required parameters' });
-    }
-    
-    const payload = {
-      appId: CASHWYRE_CONFIG.appId,
-      requestId: requestId,
-      transactionReference: transactionReference,
-      reference: reference
-    };
-    
-    const result = await cashwyreApiCall('/payin/confirmPayin', payload);
-    res.json(result);
-  } catch (error) {
-    console.error('Confirm payin error:', error.message);
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-// Get payin status
-app.post('/api/payments/payin-status', async (req, res) => {
-  try {
-    const { requestId, transactionReference } = req.body;
-    
-    if (!requestId || !transactionReference) {
-      return res.status(400).json({ success: false, message: 'Missing required parameters' });
-    }
-    
-    const payload = {
-      appId: CASHWYRE_CONFIG.appId,
-      requestId: requestId,
-      transactionReference: transactionReference
-    };
-    
-    const result = await cashwyreApiCall('/payin/payinStatus', payload);
-    res.json(result);
-  } catch (error) {
-    console.error('Payin status error:', error.message);
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-// Get user balance
-app.get('/api/wallet/balance/:userId', async (req, res) => {
-  try {
-    const user = await User.findById(req.params.userId);
-    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
-    res.json({ success: true, walletBalance: user.walletBalance, commissionBalance: user.commissionBalance });
-  } catch (error) {
+    console.error('Create account error:', error.message);
     res.status(500).json({ success: false, message: error.message });
   }
 });
@@ -428,7 +302,18 @@ app.get('/api/virtual-accounts/:userId', async (req, res) => {
   }
 });
 
-// Get user transactions
+// Get user balance
+app.get('/api/wallet/balance/:userId', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.userId);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    res.json({ success: true, walletBalance: user.walletBalance, commissionBalance: user.commissionBalance });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Get transactions
 app.get('/api/transactions/:userId', async (req, res) => {
   try {
     const { limit = 50, skip = 0 } = req.query;
@@ -438,7 +323,6 @@ app.get('/api/transactions/:userId', async (req, res) => {
       .skip(parseInt(skip));
     
     const total = await Transaction.countDocuments({ userId: req.params.userId });
-    
     res.json({ success: true, transactions, pagination: { total, limit: parseInt(limit), skip: parseInt(skip) } });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -620,12 +504,12 @@ app.post('/api/users/create', async (req, res) => {
   try {
     const { email, fullName, phone } = req.body;
     
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return res.json({ success: true, userId: existingUser._id, user: existingUser });
+    let user = await User.findOne({ email });
+    if (user) {
+      return res.json({ success: true, userId: user._id, user });
     }
     
-    const user = new User({ email, fullName, phone });
+    user = new User({ email, fullName, phone });
     await user.save();
     
     res.json({ success: true, userId: user._id, user });
@@ -634,7 +518,7 @@ app.post('/api/users/create', async (req, res) => {
   }
 });
 
-// Get current user (mock - in real app use JWT)
+// Get current user
 app.get('/api/users/current', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -664,62 +548,51 @@ app.get('/api/users/current', async (req, res) => {
   }
 });
 
-// ==================== 7. WEBHOOK ROUTES ====================
-// webhooks.js file content
-const webhookRoutes = (config) => {
-  const router = express.Router();
-  
-  // Cashwyre webhook for fiat deposits
-  router.post('/cashwyre', async (req, res) => {
-    try {
-      console.log('Cashwyre webhook received:', req.rawBody?.toString() || JSON.stringify(req.body));
+// ==================== WEBHOOK ====================
+app.post('/api/webhooks/cashwyre', async (req, res) => {
+  try {
+    console.log('Webhook received:', req.rawBody?.toString() || JSON.stringify(req.body));
+    
+    let webhookData;
+    if (req.rawBody) {
+      webhookData = JSON.parse(req.rawBody.toString());
+    } else {
+      webhookData = req.body;
+    }
+    
+    const { eventType, eventData } = webhookData;
+    
+    if (eventType === 'fiat_deposit.success') {
+      const { AccountNumber, AmountSettled, Code, RequestId, Narration, BankName } = eventData;
       
-      let webhookData;
-      if (req.rawBody) {
-        webhookData = JSON.parse(req.rawBody.toString());
-      } else {
-        webhookData = req.body;
-      }
-      
-      const { eventType, eventData } = webhookData;
-      
-      if (eventType === 'fiat_deposit.success') {
-        const { AccountNumber, AmountSettled, Code, RequestId, Narration, BankName } = eventData;
+      const virtualAccount = await VirtualAccount.findOne({ accountNumber: AccountNumber });
+      if (virtualAccount) {
+        const amount = parseFloat(AmountSettled);
+        const reference = `CASHWYRE_${Code || RequestId || Date.now()}`;
         
-        const virtualAccount = await VirtualAccount.findOne({ accountNumber: AccountNumber });
-        if (virtualAccount) {
-          const amount = parseFloat(AmountSettled);
-          const reference = `CASHWYRE_${Code || RequestId || Date.now()}`;
-          
-          const existingTx = await Transaction.findOne({ reference });
-          if (!existingTx) {
-            await updateWalletBalance(
-              virtualAccount.userId,
-              amount,
-              'credit',
-              reference,
-              Narration || `Deposit from ${BankName} - ${AccountNumber}`,
-              { source: 'cashwyre_webhook', paymentMethod: 'bank_transfer' }
-            );
-            console.log(`✅ Processed Cashwyre deposit: ${amount} SLE for user ${virtualAccount.userId}`);
-          }
+        const existingTx = await Transaction.findOne({ reference });
+        if (!existingTx) {
+          await updateWalletBalance(
+            virtualAccount.userId,
+            amount,
+            'credit',
+            reference,
+            Narration || `Deposit from ${BankName} - ${AccountNumber}`,
+            { source: 'cashwyre_webhook', paymentMethod: 'bank_transfer' }
+          );
+          console.log(`✅ Processed deposit: ₦${amount} for user ${virtualAccount.userId}`);
         }
       }
-      
-      res.status(200).json({ success: true, message: 'Webhook received' });
-    } catch (error) {
-      console.error('Webhook error:', error.message);
-      res.status(500).json({ success: false, message: error.message });
     }
-  });
-  
-  return router;
-};
+    
+    res.status(200).json({ success: true, message: 'Webhook received' });
+  } catch (error) {
+    console.error('Webhook error:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
 
-module.exports = webhookRoutes;
-
-// ==================== 8. START SERVER ====================
-
+// ==================== START SERVER ====================
 const PORT = process.env.PORT || 3000;
 
 mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/cashwyre_wallet')
@@ -729,7 +602,6 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/cashwyre_
       console.log(`Server running on port ${PORT}`);
       console.log(`Cashwyre Business Code: ${CASHWYRE_CONFIG.businessCode}`);
       console.log(`Currency: ${CASHWYRE_CONFIG.currency}`);
-      console.log(`Webhook URL: http://localhost:${PORT}/api/webhooks/cashwyre`);
     });
   })
-  .catch(err => console.error('MongoDB connection error:', err));
+  .catch(err => console.error('MongoDB error:', err));
