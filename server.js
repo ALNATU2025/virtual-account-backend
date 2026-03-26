@@ -655,12 +655,54 @@ app.post('/api/webhooks/cashwyre', async (req, res) => {
 const PORT = process.env.PORT || 3000;
 
 mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/cashwyre_wallet')
-  .then(() => {
+  .then(async () => {
     console.log('MongoDB connected');
+    
+    // ========== FIX: DROP THE EXISTING UNIQUE INDEX ==========
+    try {
+      const db = mongoose.connection.db;
+      const collection = db.collection('virtualaccounts');
+      
+      // Check if collection exists
+      const collections = await db.listCollections({ name: 'virtualaccounts' }).toArray();
+      
+      if (collections.length > 0) {
+        // Get all indexes
+        const indexes = await collection.indexes();
+        console.log('Current indexes:', indexes.map(i => ({ name: i.name, unique: i.unique || false })));
+        
+        // Drop the userId_1 index if it exists
+        const userIdIndex = indexes.find(idx => idx.name === 'userId_1');
+        if (userIdIndex) {
+          await collection.dropIndex('userId_1');
+          console.log('✅ Successfully dropped unique index: userId_1');
+        }
+        
+        // Ensure accountNumber has unique index
+        const accountNumberIndex = indexes.find(idx => idx.name === 'accountNumber_1');
+        if (!accountNumberIndex) {
+          await collection.createIndex({ accountNumber: 1 }, { unique: true });
+          console.log('✅ Created unique index on accountNumber');
+        }
+        
+        // Create compound index for faster queries
+        await collection.createIndex({ userId: 1, createdAt: -1 });
+        console.log('✅ Created compound index on userId + createdAt');
+        
+      } else {
+        console.log('Collection virtualaccounts does not exist yet, will be created on first save');
+      }
+      
+    } catch (err) {
+      console.log('Index cleanup warning:', err.message);
+    }
+    // ========== END INDEX FIX ==========
+    
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`Server running on port ${PORT}`);
       console.log(`Cashwyre Business Code: ${CASHWYRE_CONFIG.businessCode}`);
       console.log(`Currency: ${CASHWYRE_CONFIG.currency}`);
+      console.log(`API URL: http://localhost:${PORT}/api/virtual-accounts/create-dynamic`);
     });
   })
   .catch(err => console.error('MongoDB error:', err));
