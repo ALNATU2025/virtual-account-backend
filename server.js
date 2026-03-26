@@ -75,6 +75,8 @@ const TransactionSchema = new mongoose.Schema({
   completedAt: { type: Date, default: Date.now }
 });
 
+
+
 const VirtualAccountSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   accountNumber: { type: String, required: true },
@@ -85,12 +87,17 @@ const VirtualAccountSchema = new mongoose.Schema({
   amount: { type: Number, required: true },
   totalPayable: { type: Number, required: true },
   fee: { type: Number, required: true },
-  cashwyreRequestId: { type: String, required: true },
+  cashwyreRequestId: { type: String, required: true, unique: true }, // Keep unique on requestId only
   expiresOn: { type: Date, required: true },
   expiresOnInMins: { type: Number, required: true },
   active: { type: Boolean, default: true },
   createdAt: { type: Date, default: Date.now }
 });
+
+// NO unique index on userId - allow multiple accounts per user
+// Add compound index for better query performance (not unique)
+VirtualAccountSchema.index({ userId: 1, createdAt: -1 });
+VirtualAccountSchema.index({ accountNumber: 1 }, { unique: true }); // Account numbers should be unique
 
 const User = mongoose.model('User', UserSchema);
 const Transaction = mongoose.model('Transaction', TransactionSchema);
@@ -138,43 +145,53 @@ const createDynamicAccount = async (userId, amount) => {
     currency: CASHWYRE_CONFIG.currency
   };
   
-  const result = await cashwyreApiCall('/Account/createDynamicAccount', payload);
-  
-  if (result.success) {
-    const virtualAccount = new VirtualAccount({
-      userId,
-      accountNumber: result.data.accountNumber,
-      accountName: result.data.accountName,
-      bankName: result.data.bankName,
-      bankCode: result.data.bankCode,
-      currency: result.data.currency,
-      amount: result.data.amount,
-      totalPayable: result.data.totalPayable,
-      fee: result.data.fee,
-      cashwyreRequestId: requestId,
-      expiresOn: new Date(result.data.expiresOn),
-      expiresOnInMins: result.data.expiresOnInMins,
-      active: true
-    });
+  try {
+    console.log(`Creating new dynamic account for user: ${userId}, amount: ₦${amount}`);
     
-    await virtualAccount.save();
+    const result = await cashwyreApiCall('/Account/createDynamicAccount', payload);
     
-    return {
-      success: true,
-      data: {
+    if (result.success) {
+      // Create NEW virtual account record (allow multiple per user)
+      const virtualAccount = new VirtualAccount({
+        userId,
         accountNumber: result.data.accountNumber,
         accountName: result.data.accountName,
         bankName: result.data.bankName,
         bankCode: result.data.bankCode,
-        expiresOn: result.data.expiresOn,
-        expiresOnInMins: result.data.expiresOnInMins,
+        currency: result.data.currency,
         amount: result.data.amount,
         totalPayable: result.data.totalPayable,
-        fee: result.data.fee
-      }
-    };
+        fee: result.data.fee,
+        cashwyreRequestId: requestId,
+        expiresOn: new Date(result.data.expiresOn),
+        expiresOnInMins: result.data.expiresOnInMins,
+        active: true
+      });
+      
+      await virtualAccount.save();
+      
+      console.log(`✅ New virtual account created: ${result.data.accountNumber} for user ${userId}`);
+      
+      return {
+        success: true,
+        data: {
+          accountNumber: result.data.accountNumber,
+          accountName: result.data.accountName,
+          bankName: result.data.bankName,
+          bankCode: result.data.bankCode,
+          expiresOn: result.data.expiresOn,
+          expiresOnInMins: result.data.expiresOnInMins,
+          amount: result.data.amount,
+          totalPayable: result.data.totalPayable,
+          fee: result.data.fee
+        }
+      };
+    }
+    return result;
+  } catch (error) {
+    console.error('Cashwyre API error:', error.message);
+    throw error;
   }
-  return result;
 };
 
 // Update Wallet Balance
@@ -264,8 +281,14 @@ app.get('/health', (req, res) => res.json({ status: 'OK', service: 'Cashwyre Wal
 app.post('/api/virtual-accounts/create-dynamic', async (req, res) => {
   try {
     const { userId, amount } = req.body;
-    if (!userId) return res.status(400).json({ success: false, message: 'User ID required' });
-    if (!amount || amount < 100) return res.status(400).json({ success: false, message: 'Minimum amount is ₦100' });
+    
+    if (!userId) {
+      return res.status(400).json({ success: false, message: 'User ID required' });
+    }
+    
+    if (!amount || amount < 100) {
+      return res.status(400).json({ success: false, message: 'Minimum amount is ₦100' });
+    }
     
     const result = await createDynamicAccount(userId, amount);
     res.json(result);
@@ -274,6 +297,42 @@ app.post('/api/virtual-accounts/create-dynamic', async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 });
+
+
+
+// Get the most recent active virtual account for a user
+app.get('/api/virtual-accounts/latest/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    // Get the most recent active virtual account (not expired)
+    const virtualAccount = await VirtualAccount.findOne({ 
+      userId: userId,
+      expiresOn: { $gt: new Date() }
+    }).sort({ createdAt: -1 });
+    
+    if (!virtualAccount) {
+      return res.json({ success: false, message: 'No active virtual account found', hasAccount: false });
+    }
+    
+    res.json({
+      success: true,
+      accountNumber: virtualAccount.accountNumber,
+      accountName: virtualAccount.accountName,
+      bankName: virtualAccount.bankName,
+      bankCode: virtualAccount.bankCode,
+      expiresOn: virtualAccount.expiresOn,
+      active: virtualAccount.active,
+      amount: virtualAccount.amount,
+      totalPayable: virtualAccount.totalPayable,
+      fee: virtualAccount.fee
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+
 
 // Get virtual account details
 app.get('/api/virtual-accounts/:userId', async (req, res) => {
