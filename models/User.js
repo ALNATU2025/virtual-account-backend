@@ -134,6 +134,7 @@ const userSchema = mongoose.Schema(
       default: false,
     },
     
+  
     // Virtual Account fields
     virtualAccount: {
       assigned: { 
@@ -142,21 +143,23 @@ const userSchema = mongoose.Schema(
       },
       bankName: { 
         type: String, 
-        default: '' 
+        default: null 
       },
       accountNumber: { 
         type: String, 
         unique: true, 
-        sparse: true 
+        sparse: true,
+        default: null
       },
       accountName: { 
         type: String, 
-        default: '' 
+        default: null 
       },
       reference: { 
         type: String, 
         unique: true, 
-        sparse: true 
+        sparse: true,
+        default: null
       },
     },
   },
