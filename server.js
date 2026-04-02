@@ -75,8 +75,6 @@ const TransactionSchema = new mongoose.Schema({
   completedAt: { type: Date, default: Date.now }
 });
 
-
-
 const VirtualAccountSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   accountNumber: { type: String, required: true },
@@ -87,21 +85,30 @@ const VirtualAccountSchema = new mongoose.Schema({
   amount: { type: Number, required: true },
   totalPayable: { type: Number, required: true },
   fee: { type: Number, required: true },
-  cashwyreRequestId: { type: String, required: true, unique: true }, // Keep unique on requestId only
+  cashwyreRequestId: { type: String, required: true, unique: true },
+  cashwyreReference: { type: String },
   expiresOn: { type: Date, required: true },
   expiresOnInMins: { type: Number, required: true },
   active: { type: Boolean, default: true },
+  processedAt: { type: Date },
   createdAt: { type: Date, default: Date.now }
 });
 
-// NO unique index on userId - allow multiple accounts per user
-// Add compound index for better query performance (not unique)
+// Indexes
 VirtualAccountSchema.index({ userId: 1, createdAt: -1 });
-VirtualAccountSchema.index({ accountNumber: 1 }, { unique: true }); // Account numbers should be unique
+VirtualAccountSchema.index({ accountNumber: 1 }, { unique: true });
 
 const User = mongoose.model('User', UserSchema);
 const Transaction = mongoose.model('Transaction', TransactionSchema);
 const VirtualAccount = mongoose.model('VirtualAccount', VirtualAccountSchema);
+
+// Unmatched Webhook Schema for debugging
+const UnmatchedWebhookSchema = new mongoose.Schema({
+  reference: { type: String },
+  payload: { type: mongoose.Schema.Types.Mixed },
+  receivedAt: { type: Date, default: Date.now }
+});
+const UnmatchedWebhook = mongoose.model('UnmatchedWebhook', UnmatchedWebhookSchema);
 
 // ==================== HELPER FUNCTIONS ====================
 const generateRequestId = () => {
@@ -151,7 +158,6 @@ const createDynamicAccount = async (userId, amount) => {
     const result = await cashwyreApiCall('/Account/createDynamicAccount', payload);
     
     if (result.success) {
-      // Create NEW virtual account record (allow multiple per user)
       const virtualAccount = new VirtualAccount({
         userId,
         accountNumber: result.data.accountNumber,
@@ -238,7 +244,6 @@ const updateWalletBalance = async (userId, amount, type, reference, description,
     
     await transaction.save({ session });
     
-    // Record service charge separately for admin
     if (serviceCharge > 0) {
       const serviceChargeTx = new Transaction({
         userId,
@@ -298,14 +303,11 @@ app.post('/api/virtual-accounts/create-dynamic', async (req, res) => {
   }
 });
 
-
-
 // Get the most recent active virtual account for a user
 app.get('/api/virtual-accounts/latest/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
     
-    // Get the most recent active virtual account (not expired)
     const virtualAccount = await VirtualAccount.findOne({ 
       userId: userId,
       expiresOn: { $gt: new Date() }
@@ -331,8 +333,6 @@ app.get('/api/virtual-accounts/latest/:userId', async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 });
-
-
 
 // Get virtual account details
 app.get('/api/virtual-accounts/:userId', async (req, res) => {
@@ -607,6 +607,199 @@ app.get('/api/users/current', async (req, res) => {
   }
 });
 
+// ==================== CHECK PAYIN STATUS ENDPOINT ====================
+app.post('/api/payin/check-status', async (req, res) => {
+  try {
+    const { reference, transactionReference } = req.body;
+    
+    if (!reference && !transactionReference) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Reference or transactionReference required' 
+      });
+    }
+    
+    console.log('🔍 Checking payin status for:', reference || transactionReference);
+    
+    // First check local database
+    const searchRef = reference || transactionReference;
+    const transaction = await Transaction.findOne({ 
+      $or: [
+        { reference: searchRef },
+        { cashwyreReference: searchRef },
+        { 'metadata.cashwyreCode': searchRef }
+      ]
+    });
+    
+    if (transaction && transaction.status === 'completed') {
+      console.log('✅ Transaction found in local DB - COMPLETED');
+      return res.json({
+        success: true,
+        status: 'completed',
+        amount: transaction.amount,
+        data: {
+          status: 'completed',
+          depositAmount: transaction.amount,
+          transactionReference: transaction.reference
+        }
+      });
+    }
+    
+    // If not found locally, check Cashwyre directly
+    const requestId = `${Date.now()}${Math.random().toString(36).substring(2, 10)}`;
+    
+    const response = await axios.post(
+      `${CASHWYRE_CONFIG.baseURL}/payin/payinStatus`,
+      {
+        appId: CASHWYRE_CONFIG.appId,
+        requestId: requestId,
+        transactionReference: transactionReference || reference,
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${CASHWYRE_CONFIG.secretKey}`,
+        },
+        timeout: 15000
+      }
+    );
+    
+    console.log('📊 Cashwyre Status Response:', JSON.stringify(response.data));
+    
+    if (response.data.success && response.data.data) {
+      const status = response.data.data.status;
+      const amount = parseFloat(response.data.data.depositAmount || 0);
+      
+      // If completed, try to find virtual account and update
+      if (status === 'completed' || status === 'success') {
+        const virtualAccount = await VirtualAccount.findOne({ 
+          cashwyreRequestId: requestId 
+        });
+        
+        if (virtualAccount && amount > 0) {
+          await updateWalletBalance(
+            virtualAccount.userId,
+            amount,
+            'credit',
+            reference || `CASHWYRE_${Date.now()}`,
+            'Payin status check - successful',
+            { source: 'payin_status_check', cashwyreData: response.data.data }
+          );
+        }
+      }
+      
+      return res.json({
+        success: true,
+        status: status,
+        amount: amount,
+        data: response.data.data
+      });
+    }
+    
+    res.json({
+      success: false,
+      status: 'pending',
+      message: 'Payment still pending'
+    });
+    
+  } catch (error) {
+    console.error('Payin status check error:', error.message);
+    res.status(500).json({ 
+      success: false, 
+      message: error.message,
+      status: 'error'
+    });
+  }
+});
+
+// ==================== SYNC ENDPOINT FOR PHP WEBHOOK ====================
+app.post('/api/webhooks/cashwyre-sync', async (req, res) => {
+  const startTime = Date.now();
+  console.log('='.repeat(80));
+  console.log('🔄 CASHWYRE SYNC RECEIVED FROM PHP');
+  console.log('Time:', new Date().toISOString());
+  console.log('Payload:', JSON.stringify(req.body, null, 2));
+  
+  try {
+    const { userId, amount, reference, accountNumber, bankName } = req.body;
+    
+    if (!userId || !amount) {
+      console.log('❌ Missing required fields');
+      return res.status(400).json({ success: false, message: 'Missing required fields' });
+    }
+    
+    // Find the user
+    const user = await User.findById(userId);
+    if (!user) {
+      console.log('❌ User not found:', userId);
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+    
+    // Check if transaction already processed
+    const existingTx = await Transaction.findOne({ reference });
+    if (existingTx) {
+      console.log('⚠️ Transaction already processed:', reference);
+      return res.status(200).json({ success: true, message: 'Already processed' });
+    }
+    
+    // Update wallet balance
+    const oldBalance = user.walletBalance;
+    const newBalance = oldBalance + amount;
+    
+    user.walletBalance = newBalance;
+    user.updatedAt = new Date();
+    await user.save();
+    
+    // Create transaction record
+    const transaction = new Transaction({
+      userId: user._id,
+      type: 'wallet_funding',
+      amount: amount,
+      previousBalance: oldBalance,
+      newBalance: newBalance,
+      reference: reference,
+      status: 'completed',
+      description: `Cashwyre Deposit from ${bankName || 'Bank Transfer'} - ${accountNumber || ''}`,
+      metadata: {
+        source: 'cashwyre_webhook_sync',
+        accountNumber: accountNumber,
+        bankName: bankName,
+        settledAt: new Date()
+      },
+      completedAt: new Date()
+    });
+    
+    await transaction.save();
+    
+    const duration = Date.now() - startTime;
+    console.log('✅ SYNC SUCCESSFUL!');
+    console.log('   User ID:', userId);
+    console.log('   Amount: ₦' + amount.toFixed(2));
+    console.log('   Old Balance: ₦' + oldBalance.toFixed(2));
+    console.log('   New Balance: ₦' + newBalance.toFixed(2));
+    console.log('   Reference:', reference);
+    console.log('   Duration:', duration + 'ms');
+    console.log('='.repeat(80));
+    
+    res.json({
+      success: true,
+      message: 'Balance updated successfully',
+      newBalance: newBalance,
+      transaction: transaction
+    });
+    
+  } catch (error) {
+    console.error('❌ Sync error:', error.message);
+    console.error('Stack:', error.stack);
+    console.log('='.repeat(80));
+    
+    res.status(500).json({ 
+      success: false, 
+      message: error.message 
+    });
+  }
+});
+
 // ==================== WEBHOOK ====================
 app.post('/api/webhooks/cashwyre', async (req, res) => {
   try {
@@ -651,8 +844,6 @@ app.post('/api/webhooks/cashwyre', async (req, res) => {
   }
 });
 
-
-
 // ==================== CASHWYRE FIAT DEPOSIT WEBHOOK ====================
 app.post('/api/webhooks/cashwyre-fiat', async (req, res) => {
   try {
@@ -669,7 +860,6 @@ app.post('/api/webhooks/cashwyre-fiat', async (req, res) => {
     
     const { eventType, eventData } = webhookData;
     
-    // Handle fiat deposit success
     if (eventType === 'fiat_deposit.success' || eventType === 'fiat.deposit.success') {
       console.log('✅ Processing fiat deposit webhook');
       
@@ -691,13 +881,11 @@ app.post('/api/webhooks/cashwyre-fiat', async (req, res) => {
         FundingMethod
       } = eventData;
       
-      // Check if payment was successful
       if (Status !== 'success') {
         console.log(`⚠️ Payment not successful: ${Status}`);
         return res.status(200).json({ success: false, message: 'Payment not successful' });
       }
       
-      // Find the virtual account by account number
       const virtualAccount = await VirtualAccount.findOne({ 
         accountNumber: AccountNumber,
         active: true
@@ -705,30 +893,33 @@ app.post('/api/webhooks/cashwyre-fiat', async (req, res) => {
       
       if (!virtualAccount) {
         console.log(`❌ Virtual account not found for: ${AccountNumber}`);
+        
+        await UnmatchedWebhook.create({
+          reference: Code,
+          payload: req.body,
+          receivedAt: new Date()
+        });
+        
         return res.status(200).json({ success: false, message: 'Virtual account not found' });
       }
       
       console.log(`✅ Found virtual account for user: ${virtualAccount.userId}`);
       
-      // Use AmountSettled (after fees) or fallback to AmountPaid
       const amount = parseFloat(AmountSettled || AmountPaid || 0);
       const reference = `CASHWYRE_${Code || RequestId || Date.now()}`;
       
-      // Check if already processed
       const existingTx = await Transaction.findOne({ reference });
       if (existingTx) {
         console.log(`⚠️ Transaction already processed: ${reference}`);
         return res.status(200).json({ success: true, message: 'Already processed' });
       }
       
-      // Check if already processed by cashwyreReference
       const existingByCashwyre = await Transaction.findOne({ cashwyreReference: Code || RequestId });
       if (existingByCashwyre) {
         console.log(`⚠️ Transaction already processed by cashwyre ref: ${Code || RequestId}`);
         return res.status(200).json({ success: true, message: 'Already processed' });
       }
       
-      // Update wallet balance
       const result = await updateWalletBalance(
         virtualAccount.userId,
         amount,
@@ -750,8 +941,8 @@ app.post('/api/webhooks/cashwyre-fiat', async (req, res) => {
         }
       );
       
-      // Update virtual account with cashwyre reference
       virtualAccount.cashwyreReference = Code || RequestId;
+      virtualAccount.processedAt = new Date();
       await virtualAccount.save();
       
       console.log(`✅ Successfully processed deposit: ₦${amount} for user ${virtualAccount.userId}`);
@@ -771,7 +962,6 @@ app.post('/api/webhooks/cashwyre-fiat', async (req, res) => {
     
   } catch (error) {
     console.error('❌ Cashwyre webhook error:', error.message);
-    // Always return 200 to acknowledge receipt
     return res.status(200).json({ success: false, message: error.message });
   }
 });
@@ -783,34 +973,28 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/cashwyre_
   .then(async () => {
     console.log('MongoDB connected');
     
-    // ========== FIX: DROP THE EXISTING UNIQUE INDEX ==========
     try {
       const db = mongoose.connection.db;
       const collection = db.collection('virtualaccounts');
       
-      // Check if collection exists
       const collections = await db.listCollections({ name: 'virtualaccounts' }).toArray();
       
       if (collections.length > 0) {
-        // Get all indexes
         const indexes = await collection.indexes();
         console.log('Current indexes:', indexes.map(i => ({ name: i.name, unique: i.unique || false })));
         
-        // Drop the userId_1 index if it exists
         const userIdIndex = indexes.find(idx => idx.name === 'userId_1');
         if (userIdIndex) {
           await collection.dropIndex('userId_1');
           console.log('✅ Successfully dropped unique index: userId_1');
         }
         
-        // Ensure accountNumber has unique index
         const accountNumberIndex = indexes.find(idx => idx.name === 'accountNumber_1');
         if (!accountNumberIndex) {
           await collection.createIndex({ accountNumber: 1 }, { unique: true });
           console.log('✅ Created unique index on accountNumber');
         }
         
-        // Create compound index for faster queries
         await collection.createIndex({ userId: 1, createdAt: -1 });
         console.log('✅ Created compound index on userId + createdAt');
         
@@ -821,13 +1005,14 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/cashwyre_
     } catch (err) {
       console.log('Index cleanup warning:', err.message);
     }
-    // ========== END INDEX FIX ==========
     
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`Server running on port ${PORT}`);
       console.log(`Cashwyre Business Code: ${CASHWYRE_CONFIG.businessCode}`);
       console.log(`Currency: ${CASHWYRE_CONFIG.currency}`);
       console.log(`API URL: http://localhost:${PORT}/api/virtual-accounts/create-dynamic`);
+      console.log(`Payin Status URL: http://localhost:${PORT}/api/payin/check-status`);
+      console.log(`Sync URL: http://localhost:${PORT}/api/webhooks/cashwyre-sync`);
     });
   })
   .catch(err => console.error('MongoDB error:', err));
