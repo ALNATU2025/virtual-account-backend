@@ -1116,6 +1116,107 @@ app.post('/api/webhooks/cashwyre-fiat', async (req, res) => {
   }
 });
 
+
+
+
+
+// ==================== MANUAL BALANCE RECOVERY ENDPOINT ====================
+app.post('/api/admin/recover-payment', async (req, res) => {
+  try {
+    const { userId, amount, reference, cashwyreCode, accountNumber } = req.body;
+    
+    console.log('🔄 MANUAL RECOVERY REQUEST:');
+    console.log('   User ID:', userId);
+    console.log('   Amount: ₦' + amount);
+    console.log('   Cashwyre Code:', cashwyreCode);
+    
+    if (!userId || !amount) {
+      return res.status(400).json({ success: false, message: 'Missing userId or amount' });
+    }
+    
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+    
+    // Check if already processed
+    const existingTx = await Transaction.findOne({ cashwyreReference: cashwyreCode });
+    if (existingTx) {
+      return res.json({ 
+        success: true, 
+        message: 'Already processed',
+        alreadyProcessed: true,
+        newBalance: user.walletBalance
+      });
+    }
+    
+    // Update balance
+    const oldBalance = user.walletBalance;
+    const newBalance = oldBalance + amount;
+    
+    user.walletBalance = newBalance;
+    await user.save();
+    
+    // Create transaction record
+    const transaction = new Transaction({
+      userId: user._id,
+      type: 'wallet_funding',
+      amount: amount,
+      previousBalance: oldBalance,
+      newBalance: newBalance,
+      reference: cashwyreCode || `MANUAL_${Date.now()}`,
+      cashwyreReference: cashwyreCode,
+      status: 'completed',
+      description: `MANUAL RECOVERY: Cashwyre Deposit - ${accountNumber || ''}`,
+      metadata: {
+        source: 'manual_recovery',
+        accountNumber: accountNumber,
+        cashwyreCode: cashwyreCode,
+        recoveredAt: new Date()
+      },
+      completedAt: new Date()
+    });
+    
+    await transaction.save();
+    
+    console.log('✅ MANUAL RECOVERY SUCCESSFUL!');
+    console.log('   Old Balance: ₦' + oldBalance);
+    console.log('   New Balance: ₦' + newBalance);
+    
+    res.json({
+      success: true,
+      message: 'Payment recovered successfully',
+      newBalance: newBalance,
+      oldBalance: oldBalance,
+      transaction: transaction
+    });
+    
+  } catch (error) {
+    console.error('Manual recovery error:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// ==================== GET PENDING TRANSACTIONS ====================
+app.get('/api/admin/pending-transactions', async (req, res) => {
+  try {
+    const pendingTransactions = await VirtualAccount.find({
+      active: true,
+      expiresOn: { $gt: new Date() }
+    }).sort({ createdAt: -1 }).limit(20);
+    
+    res.json({
+      success: true,
+      transactions: pendingTransactions,
+      count: pendingTransactions.length
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+
+
 // ==================== START SERVER ====================
 const PORT = process.env.PORT || 3000;
 
