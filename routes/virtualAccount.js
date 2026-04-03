@@ -205,6 +205,7 @@ router.post('/create-instant-account', async (req, res) => {
                 console.log(`✅ Virtual account saved to database: ${virtualAccount.account_number}`);
 
                 // ✅ ADD THIS: Update the user document automatically
+                // ✅ ADD THIS: Update the user document automatically
 await User.updateOne(
     { _id: userId },
     {
@@ -216,7 +217,8 @@ await User.updateOne(
                 accountName: virtualAccount.account_name,
                 bankName: virtualAccount.bank.name,
                 bankCode: virtualAccount.bank.id.toString(),
-                customerCode: customerCode
+                customerCode: customerCode,
+                reference: paystackReference  // ← ADD THIS LINE!
             }
         }
     }
@@ -261,6 +263,7 @@ console.log(`✅ User document updated with virtual account info: ${userId}`);
                         const paystackReference = existingPaystackAccount.reference || `REF_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
                         // Save to our database
+                                           // Save to our database
                         const newVirtualAccount = new VirtualAccount({
                             userId: userId,
                             accountNumber: existingPaystackAccount.account_number,
@@ -270,10 +273,29 @@ console.log(`✅ User document updated with virtual account info: ${userId}`);
                             customerCode: customerCode,
                             assigned: true,
                             active: existingPaystackAccount.active,
-                            paystackReference: paystackReference // ✅ This is now provided
+                            paystackReference: paystackReference
                         });
 
                         await newVirtualAccount.save();
+
+                        // ✅ ALSO UPDATE THE USER DOCUMENT
+                        await User.updateOne(
+                            { _id: userId },
+                            {
+                                $set: {
+                                    virtualAccountNumber: existingPaystackAccount.account_number,
+                                    virtualAccount: {
+                                        assigned: true,
+                                        accountNumber: existingPaystackAccount.account_number,
+                                        accountName: existingPaystackAccount.account_name,
+                                        bankName: existingPaystackAccount.bank.name,
+                                        bankCode: existingPaystackAccount.bank.id.toString(),
+                                        customerCode: customerCode,
+                                        reference: paystackReference  // ← ADD THIS!
+                                    }
+                                }
+                            }
+                        );
 
                         console.log(`✅ Existing virtual account saved: ${existingPaystackAccount.account_number}`);
 
