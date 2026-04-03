@@ -372,6 +372,72 @@ app.get('/api/wallet/balance/:userId', async (req, res) => {
   }
 });
 
+
+
+
+
+// Add this to your server.js - Get Cashwyre transactions for a user
+app.get('/api/transactions/cashwyre/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { limit = 100, skip = 0 } = req.query;
+    
+    // Get wallet funding transactions from Cashwyre
+    const transactions = await Transaction.find({ 
+      userId: userId,
+      type: 'wallet_funding',
+      'metadata.source': 'cashwyre_webhook_sync'
+    })
+    .sort({ createdAt: -1 })
+    .limit(parseInt(limit))
+    .skip(parseInt(skip));
+    
+    const total = await Transaction.countDocuments({ 
+      userId: userId,
+      type: 'wallet_funding',
+      'metadata.source': 'cashwyre_webhook_sync'
+    });
+    
+    res.json({
+      success: true,
+      transactions: transactions,
+      total: total,
+      source: 'cashwyre'
+    });
+  } catch (error) {
+    console.error('Error fetching Cashwyre transactions:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Get all transactions (combined from both sources)
+app.get('/api/transactions/all/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { limit = 100, skip = 0 } = req.query;
+    
+    // Get all transactions (all types, all sources)
+    const transactions = await Transaction.find({ userId: userId })
+      .sort({ createdAt: -1 })
+      .limit(parseInt(limit))
+      .skip(parseInt(skip));
+    
+    const total = await Transaction.countDocuments({ userId: userId });
+    
+    res.json({
+      success: true,
+      transactions: transactions,
+      total: total,
+      pagination: { limit: parseInt(limit), skip: parseInt(skip) }
+    });
+  } catch (error) {
+    console.error('Error fetching all transactions:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+
+
 // Get transactions
 app.get('/api/transactions/:userId', async (req, res) => {
   try {
