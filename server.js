@@ -303,6 +303,29 @@ app.post('/api/virtual-accounts/create-dynamic', async (req, res) => {
   }
 });
 
+
+
+// Unmatched webhook endpoint
+app.post('/api/webhooks/unmatched', async (req, res) => {
+  console.log('📦 Unmatched webhook received:', JSON.stringify(req.body, null, 2));
+  
+  try {
+    const unmatched = new UnmatchedWebhook({
+      reference: req.body.cashwyreCode,
+      payload: req.body,
+      receivedAt: new Date()
+    });
+    await unmatched.save();
+    
+    res.json({ success: true, message: 'Unmatched webhook stored' });
+  } catch (error) {
+    console.error('Error storing unmatched webhook:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+
+
 // Get the most recent active virtual account for a user
 app.get('/api/virtual-accounts/latest/:userId', async (req, res) => {
   try {
@@ -495,6 +518,42 @@ app.get('/api/admin/service-charges', async (req, res) => {
   }
 });
 
+
+// Partial payment webhook endpoint
+app.post('/api/webhooks/partial-payment', async (req, res) => {
+  console.log('⚠️ Partial payment webhook received:', JSON.stringify(req.body, null, 2));
+  
+  try {
+    const { userId, amount, reference, accountNumber, requiredAmount } = req.body;
+    
+    // Create a partial payment record
+    const partialPayment = new Transaction({
+      userId,
+      type: 'partial_payment',
+      amount,
+      previousBalance: 0,
+      newBalance: 0,
+      reference: `PARTIAL_${reference}`,
+      status: 'failed',
+      description: `Partial payment of ₦${amount} detected. Required amount was ₦${requiredAmount}. Contact support.`,
+      metadata: {
+        source: 'cashwyre_webhook',
+        accountNumber: accountNumber,
+        requiredAmount: requiredAmount,
+        isPartial: true
+      },
+      completedAt: new Date()
+    });
+    
+    await partialPayment.save();
+    
+    res.json({ success: true, message: 'Partial payment recorded' });
+  } catch (error) {
+    console.error('Error processing partial payment:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 // Transfer to user
 app.post('/api/transfer', async (req, res) => {
   try {
@@ -678,22 +737,17 @@ app.post('/api/payin/check-status', async (req, res) => {
   try {
     const { reference, transactionReference } = req.body;
     
-    if (!reference && !transactionReference) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Reference or transactionReference required' 
-      });
-    }
-    
-    console.log('🔍 Checking payin status for:', reference || transactionReference);
-    
-    // First check local database
     const searchRef = reference || transactionReference;
+    console.log('🔍 Checking payin status for:', searchRef);
+    
+    // Search in Transaction table by multiple fields
     const transaction = await Transaction.findOne({ 
       $or: [
         { reference: searchRef },
         { cashwyreReference: searchRef },
-        { 'metadata.cashwyreCode': searchRef }
+        { 'metadata.cashwyreCode': searchRef },
+        { 'metadata.cashwyreRequestId': searchRef },
+        { 'metadata.requestId': searchRef }
       ]
     });
     
@@ -711,55 +765,67 @@ app.post('/api/payin/check-status', async (req, res) => {
       });
     }
     
-    // If not found locally, check Cashwyre directly
-    const requestId = `${Date.now()}${Math.random().toString(36).substring(2, 10)}`;
+    // Search in VirtualAccount table
+    const virtualAccount = await VirtualAccount.findOne({
+      $or: [
+        { cashwyreRequestId: searchRef },
+        { cashwyreReference: searchRef },
+        { reference: searchRef }
+      ]
+    });
     
-    const response = await axios.post(
-      `${CASHWYRE_CONFIG.baseURL}/payin/payinStatus`,
-      {
-        appId: CASHWYRE_CONFIG.appId,
-        requestId: requestId,
-        transactionReference: transactionReference || reference,
-      },
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${CASHWYRE_CONFIG.secretKey}`,
-        },
-        timeout: 15000
-      }
-    );
-    
-    console.log('📊 Cashwyre Status Response:', JSON.stringify(response.data));
-    
-    if (response.data.success && response.data.data) {
-      const status = response.data.data.status;
-      const amount = parseFloat(response.data.data.depositAmount || 0);
+    if (virtualAccount && virtualAccount.amount) {
+      console.log('✅ Found virtual account with matching ID');
+      console.log('   User ID:', virtualAccount.userId);
+      console.log('   Amount:', virtualAccount.amount);
       
-      // If completed, try to find virtual account and update
-      if (status === 'completed' || status === 'success') {
-        const virtualAccount = await VirtualAccount.findOne({ 
-          cashwyreRequestId: requestId 
-        });
+      // Check Cashwyre for status
+      const requestId = `${Date.now()}${Math.random().toString(36).substring(2, 10)}`;
+      
+      try {
+        const response = await axios.post(
+          `${CASHWYRE_CONFIG.baseURL}/payin/payinStatus`,
+          {
+            appId: CASHWYRE_CONFIG.appId,
+            requestId: requestId,
+            transactionReference: virtualAccount.cashwyreRequestId,
+          },
+          {
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${CASHWYRE_CONFIG.secretKey}`,
+            },
+            timeout: 15000
+          }
+        );
         
-        if (virtualAccount && amount > 0) {
-          await updateWalletBalance(
-            virtualAccount.userId,
-            amount,
-            'credit',
-            reference || `CASHWYRE_${Date.now()}`,
-            'Payin status check - successful',
-            { source: 'payin_status_check', cashwyreData: response.data.data }
-          );
+        console.log('📊 Cashwyre Status Response:', JSON.stringify(response.data));
+        
+        if (response.data.success && response.data.data) {
+          const status = response.data.data.status;
+          const amount = parseFloat(response.data.data.depositAmount || 0);
+          
+          if (status === 'completed' || status === 'success') {
+            await updateWalletBalance(
+              virtualAccount.userId,
+              amount,
+              'credit',
+              response.data.data.transactionReference || virtualAccount.cashwyreRequestId,
+              'Payin status check - successful',
+              { source: 'payin_status_check', cashwyreData: response.data.data }
+            );
+            
+            return res.json({
+              success: true,
+              status: 'completed',
+              amount: amount,
+              data: response.data.data
+            });
+          }
         }
+      } catch (cashwyreError) {
+        console.log('Cashwyre check error:', cashwyreError.message);
       }
-      
-      return res.json({
-        success: true,
-        status: status,
-        amount: amount,
-        data: response.data.data
-      });
     }
     
     res.json({
@@ -782,12 +848,12 @@ app.post('/api/payin/check-status', async (req, res) => {
 app.post('/api/webhooks/cashwyre-sync', async (req, res) => {
   const startTime = Date.now();
   console.log('='.repeat(80));
-  console.log('🔄 CASHWYRE SYNC RECEIVED FROM PHP');
+  console.log('🔄 CASHWYRE SYNC RECEIVED');
   console.log('Time:', new Date().toISOString());
   console.log('Payload:', JSON.stringify(req.body, null, 2));
   
   try {
-    const { userId, amount, reference, accountNumber, bankName } = req.body;
+    const { userId, amount, reference, cashwyreCode, accountNumber, bankName, sourceOfPayment, amountPaid, amountSettled, transactionId, settledOn, type } = req.body;
     
     if (!userId || !amount) {
       console.log('❌ Missing required fields');
@@ -801,11 +867,23 @@ app.post('/api/webhooks/cashwyre-sync', async (req, res) => {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
     
-    // Check if transaction already processed
-    const existingTx = await Transaction.findOne({ reference });
+    // Check if transaction already processed by reference or cashwyreCode
+    const existingTx = await Transaction.findOne({ 
+      $or: [
+        { reference: reference },
+        { cashwyreReference: cashwyreCode },
+        { 'metadata.cashwyreCode': cashwyreCode }
+      ]
+    });
+    
     if (existingTx) {
       console.log('⚠️ Transaction already processed:', reference);
-      return res.status(200).json({ success: true, message: 'Already processed' });
+      return res.status(200).json({ 
+        success: true, 
+        message: 'Already processed',
+        newBalance: user.walletBalance,
+        alreadyProcessed: true
+      });
     }
     
     // Update wallet balance
@@ -819,20 +897,26 @@ app.post('/api/webhooks/cashwyre-sync', async (req, res) => {
     // Create transaction record
     const transaction = new Transaction({
       userId: user._id,
-      type: 'wallet_funding',
+      type: type === 'partial_payment' ? 'partial_payment' : 'wallet_funding',
       amount: amount,
       previousBalance: oldBalance,
       newBalance: newBalance,
-      reference: reference,
+      reference: cashwyreCode || reference,
+      cashwyreReference: cashwyreCode,
       status: 'completed',
       description: `Cashwyre Deposit from ${bankName || 'Bank Transfer'} - ${accountNumber || ''}`,
       metadata: {
         source: 'cashwyre_webhook_sync',
         accountNumber: accountNumber,
         bankName: bankName,
-        settledAt: new Date()
+        sourceOfPayment: sourceOfPayment,
+        amountPaid: amountPaid,
+        amountSettled: amountSettled,
+        originalTransactionId: transactionId,
+        settledOn: settledOn,
+        cashwyreCode: cashwyreCode
       },
-      completedAt: new Date()
+      completedAt: new Date(settledOn || new Date())
     });
     
     await transaction.save();
@@ -843,7 +927,7 @@ app.post('/api/webhooks/cashwyre-sync', async (req, res) => {
     console.log('   Amount: ₦' + amount.toFixed(2));
     console.log('   Old Balance: ₦' + oldBalance.toFixed(2));
     console.log('   New Balance: ₦' + newBalance.toFixed(2));
-    console.log('   Reference:', reference);
+    console.log('   Cashwyre Code:', cashwyreCode);
     console.log('   Duration:', duration + 'ms');
     console.log('='.repeat(80));
     
