@@ -910,16 +910,15 @@ app.post('/api/payin/check-status', async (req, res) => {
 });
 
 // ==================== SYNC ENDPOINT FOR PHP WEBHOOK ====================
-// In virtual-account-backend/server.js - REPLACE the /api/webhooks/cashwyre-sync endpoint
-
- console.log('🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥');
+app.post('/api/webhooks/cashwyre-sync', async (req, res) => {
+  // ADD THESE LOGS INSIDE THE ROUTE HANDLER
+  console.log('🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥');
   console.log('WEBHOOK RECEIVED BY NODE.JS SERVER');
   console.log('Time:', new Date().toISOString());
   console.log('Headers:', JSON.stringify(req.headers, null, 2));
   console.log('Body:', JSON.stringify(req.body, null, 2));
   console.log('🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥');
-
-app.post('/api/webhooks/cashwyre-sync', async (req, res) => {
+  
   const startTime = Date.now();
   console.log('='.repeat(80));
   console.log('🔄 CASHWYRE SYNC RECEIVED');
