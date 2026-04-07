@@ -904,24 +904,29 @@ app.post('/api/webhooks/cashwyre-sync', async (req, res) => {
   console.log('='.repeat(80));
   console.log('🔄 CASHWYRE SYNC RECEIVED');
   console.log('Time:', new Date().toISOString());
+  console.log('Headers:', JSON.stringify(req.headers, null, 2));
   console.log('Payload:', JSON.stringify(req.body, null, 2));
   
+  // ALWAYS send 200 response immediately to acknowledge receipt
+  res.status(200).json({ success: true, message: 'Webhook received - processing' });
+  
+  // Continue processing asynchronously
   try {
     const { userId, amount, reference, cashwyreCode, accountNumber, bankName, sourceOfPayment, amountPaid, amountSettled, transactionId, settledOn, type } = req.body;
     
     if (!userId || !amount) {
       console.log('❌ Missing required fields');
-      return res.status(400).json({ success: false, message: 'Missing required fields' });
+      return;
     }
     
     // Find the user
     const user = await User.findById(userId);
     if (!user) {
       console.log('❌ User not found:', userId);
-      return res.status(404).json({ success: false, message: 'User not found' });
+      return;
     }
     
-    // SEARCH FOR PENDING TRANSACTION FIRST
+    // SEARCH FOR PENDING TRANSACTION
     let pendingTransaction = await Transaction.findOne({ 
       $or: [
         { reference: cashwyreCode },
@@ -934,7 +939,6 @@ app.post('/api/webhooks/cashwyre-sync', async (req, res) => {
     });
     
     if (!pendingTransaction) {
-      // Also try to find by account number in metadata
       pendingTransaction = await Transaction.findOne({
         userId: userId,
         'metadata.accountNumber': accountNumber,
@@ -956,7 +960,6 @@ app.post('/api/webhooks/cashwyre-sync', async (req, res) => {
       user.updatedAt = new Date();
       await user.save();
       
-      // UPDATE existing pending transaction
       pendingTransaction.status = 'completed';
       pendingTransaction.newBalance = newBalance;
       pendingTransaction.previousBalance = oldBalance;
@@ -980,29 +983,11 @@ app.post('/api/webhooks/cashwyre-sync', async (req, res) => {
       
       transaction = await pendingTransaction.save();
       console.log(`✅ UPDATED pending transaction to completed: ${transaction._id}`);
+      console.log(`💰 New balance: ₦${newBalance}`);
       
     } else {
-      // Check if already processed (completed transaction exists)
-      const existingCompleted = await Transaction.findOne({ 
-        $or: [
-          { reference: cashwyreCode },
-          { cashwyreReference: cashwyreCode },
-          { 'metadata.cashwyreCode': cashwyreCode }
-        ],
-        status: 'completed'
-      });
+      console.log('⚠️ No pending transaction found, creating new completed transaction');
       
-      if (existingCompleted) {
-        console.log('⚠️ Transaction already completed:', cashwyreCode);
-        return res.status(200).json({ 
-          success: true, 
-          message: 'Already processed',
-          newBalance: user.walletBalance,
-          alreadyProcessed: true
-        });
-      }
-      
-      // Create new completed transaction (fallback)
       oldBalance = user.walletBalance;
       newBalance = oldBalance + amount;
       
@@ -1012,7 +997,7 @@ app.post('/api/webhooks/cashwyre-sync', async (req, res) => {
       
       transaction = new Transaction({
         userId: user._id,
-        type: type === 'partial_payment' ? 'partial_payment' : 'wallet_funding',
+        type: 'wallet_funding',
         amount: amount,
         previousBalance: oldBalance,
         newBalance: newBalance,
@@ -1037,34 +1022,17 @@ app.post('/api/webhooks/cashwyre-sync', async (req, res) => {
       
       await transaction.save();
       console.log(`✅ Created new completed transaction: ${transaction._id}`);
+      console.log(`💰 New balance: ₦${newBalance}`);
     }
     
     const duration = Date.now() - startTime;
-    console.log('✅ SYNC SUCCESSFUL!');
-    console.log('   User ID:', userId);
-    console.log('   Amount: ₦' + amount.toFixed(2));
-    console.log('   Old Balance: ₦' + oldBalance.toFixed(2));
-    console.log('   New Balance: ₦' + newBalance.toFixed(2));
-    console.log('   Transaction Status: completed');
-    console.log('   Duration:', duration + 'ms');
+    console.log('✅ SYNC COMPLETED in ' + duration + 'ms');
     console.log('='.repeat(80));
-    
-    res.json({
-      success: true,
-      message: 'Balance updated successfully',
-      newBalance: newBalance,
-      transaction: transaction
-    });
     
   } catch (error) {
     console.error('❌ Sync error:', error.message);
     console.error('Stack:', error.stack);
     console.log('='.repeat(80));
-    
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
   }
 });
 
