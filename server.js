@@ -145,7 +145,7 @@ const cashwyreApiCall = async (endpoint, data) => {
 };
 
 // Create Dynamic Virtual Account
-// REPLACE the entire createDynamicAccount function with this
+// REPLACE the entire createDynamicAccount function with this SIMPLE version
 
 const createDynamicAccount = async (userId, amount) => {
   const requestId = generateRequestId();
@@ -158,71 +158,62 @@ const createDynamicAccount = async (userId, amount) => {
     yourServiceCharge = 50;
   }
   
-  // Total user pays = amount + your service charge (NO Cashwyre fee added)
+  // User pays = amount + your service charge
   const userTotalPayable = amount + yourServiceCharge;
   
-  console.log(`💰 FEE BREAKDOWN:`);
-  console.log(`   User wants to fund: ₦${amount}`);
-  console.log(`   Your service charge: ₦${yourServiceCharge}`);
-  console.log(`   User will pay: ₦${userTotalPayable}`);
-  console.log(`   User will receive: ₦${amount}`);
-  console.log(`   Cashwyre will deduct their fee from your settlement`);
+  console.log(`💰 SIMPLE:`);
+  console.log(`   User wants: ₦${amount}`);
+  console.log(`   User pays: ₦${userTotalPayable}`);
+  console.log(`   User receives: ₦${amount}`);
+  console.log(`   You keep: ₦${yourServiceCharge}`);
+  console.log(`   Cashwyre deducts their fee from what they send you`);
   
   const payload = {
     appId: CASHWYRE_CONFIG.appId,
     requestId: requestId,
-    Amount: userTotalPayable,  // Send userTotalPayable to Cashwyre
+    Amount: userTotalPayable,
     businessCode: CASHWYRE_CONFIG.businessCode,
     currency: CASHWYRE_CONFIG.currency
   };
   
   try {
-    console.log(`Creating virtual account for user: ${userId}`);
+    console.log(`Creating virtual account...`);
     
     const result = await cashwyreApiCall('/Account/createDynamicAccount', payload);
     
     if (result.success) {
-      // Create pending transaction with USER'S amount
+      // Create pending transaction
       const user = await User.findById(userId);
       if (user) {
         const balanceBefore = user.walletBalance;
         
-        const existingPending = await Transaction.findOne({ 
+        const pendingTransaction = new Transaction({
+          userId: userId,
+          type: 'wallet_funding',
+          amount: amount,
+          previousBalance: balanceBefore,
+          newBalance: balanceBefore,
           reference: requestId,
-          status: 'pending'
+          cashwyreReference: result.data.cashwyreReference,
+          status: 'pending',
+          description: `Wallet funding - ₦${amount}`,
+          metadata: {
+            source: 'cashwyre',
+            accountNumber: result.data.accountNumber,
+            accountName: result.data.accountName,
+            bankName: result.data.bankName,
+            bankCode: result.data.bankCode,
+            totalPayable: userTotalPayable,
+            amountToCredit: amount,
+            expiresOn: result.data.expiresOn,
+            expiresOnInMins: result.data.expiresOnInMins,
+            requestId: requestId,
+          },
+          completedAt: null
         });
         
-        if (!existingPending) {
-          const pendingTransaction = new Transaction({
-            userId: userId,
-            type: 'wallet_funding',
-            amount: amount,  // User will receive this amount
-            previousBalance: balanceBefore,
-            newBalance: balanceBefore,
-            reference: requestId,
-            cashwyreReference: result.data.cashwyreReference,
-            status: 'pending',
-            description: `Wallet funding - ₦${amount} will be credited`,
-            metadata: {
-              source: 'cashwyre',
-              accountNumber: result.data.accountNumber,
-              accountName: result.data.accountName,
-              bankName: result.data.bankName,
-              bankCode: result.data.bankCode,
-              totalPayable: userTotalPayable,  // What user pays
-              yourServiceCharge: yourServiceCharge,
-              amountToCredit: amount,
-              expiresOn: result.data.expiresOn,
-              expiresOnInMins: result.data.expiresOnInMins,
-              requestId: requestId,
-              createdAt: new Date()
-            },
-            completedAt: null
-          });
-          
-          await pendingTransaction.save();
-          console.log(`✅ PENDING TRANSACTION: ₦${amount} will be credited to user`);
-        }
+        await pendingTransaction.save();
+        console.log(`✅ Pending transaction saved`);
       }
       
       const virtualAccount = new VirtualAccount({
@@ -233,7 +224,7 @@ const createDynamicAccount = async (userId, amount) => {
         bankCode: result.data.bankCode,
         currency: result.data.currency,
         amount: amount,
-        totalPayable: userTotalPayable,  // This is what user pays
+        totalPayable: userTotalPayable,
         fee: yourServiceCharge,
         cashwyreRequestId: requestId,
         cashwyreReference: result.data.cashwyreReference,
@@ -244,11 +235,9 @@ const createDynamicAccount = async (userId, amount) => {
       
       await virtualAccount.save();
       
-      console.log(`✅ Virtual account created: ${result.data.accountNumber}`);
+      console.log(`✅ Virtual account: ${result.data.accountNumber}`);
       console.log(`   User pays: ₦${userTotalPayable}`);
       console.log(`   User receives: ₦${amount}`);
-      console.log(`   Your service charge: ₦${yourServiceCharge}`);
-      console.log(`   Cashwyre will deduct their fee from your ₦${userTotalPayable}`);
       
       return {
         success: true,
@@ -268,7 +257,7 @@ const createDynamicAccount = async (userId, amount) => {
     }
     return result;
   } catch (error) {
-    console.error('Cashwyre API error:', error.message);
+    console.error('Error:', error.message);
     throw error;
   }
 };
@@ -922,6 +911,13 @@ app.post('/api/payin/check-status', async (req, res) => {
 
 // ==================== SYNC ENDPOINT FOR PHP WEBHOOK ====================
 // In virtual-account-backend/server.js - REPLACE the /api/webhooks/cashwyre-sync endpoint
+
+ console.log('🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥');
+  console.log('WEBHOOK RECEIVED BY NODE.JS SERVER');
+  console.log('Time:', new Date().toISOString());
+  console.log('Headers:', JSON.stringify(req.headers, null, 2));
+  console.log('Body:', JSON.stringify(req.body, null, 2));
+  console.log('🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥');
 
 app.post('/api/webhooks/cashwyre-sync', async (req, res) => {
   const startTime = Date.now();
