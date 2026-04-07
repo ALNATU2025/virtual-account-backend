@@ -141,6 +141,10 @@ const cashwyreApiCall = async (endpoint, data) => {
 };
 
 // Create Dynamic Virtual Account
+// In virtual-account-backend/server.js - REPLACE the createDynamicAccount function
+
+// In virtual-account-backend/server.js - REPLACE the entire createDynamicAccount function
+
 const createDynamicAccount = async (userId, amount) => {
   const requestId = generateRequestId();
   
@@ -158,6 +162,52 @@ const createDynamicAccount = async (userId, amount) => {
     const result = await cashwyreApiCall('/Account/createDynamicAccount', payload);
     
     if (result.success) {
+      // ✅ ADD THIS: Create pending transaction IMMEDIATELY
+      const user = await User.findById(userId);
+      if (user) {
+        const balanceBefore = user.walletBalance;
+        
+        // Check if pending transaction already exists for this requestId
+        const existingPending = await Transaction.findOne({ 
+          reference: requestId,
+          status: 'pending'
+        });
+        
+        if (!existingPending) {
+          const pendingTransaction = new Transaction({
+            userId: userId,
+            type: 'wallet_funding',
+            amount: amount,
+            previousBalance: balanceBefore,
+            newBalance: balanceBefore, // Balance unchanged until payment completes
+            reference: requestId,
+            cashwyreReference: result.data.cashwyreReference,
+            status: 'pending',
+            description: `Virtual Account Funding - Transfer to ${result.data.accountNumber}`,
+            metadata: {
+              source: 'cashwyre',
+              accountNumber: result.data.accountNumber,
+              accountName: result.data.accountName,
+              bankName: result.data.bankName,
+              bankCode: result.data.bankCode,
+              totalPayable: result.data.totalPayable,
+              fee: result.data.fee,
+              expiresOn: result.data.expiresOn,
+              expiresOnInMins: result.data.expiresOnInMins,
+              requestId: requestId,
+              amount: amount,
+              createdAt: new Date()
+            },
+            completedAt: null
+          });
+          
+          await pendingTransaction.save();
+          console.log(`✅ PENDING TRANSACTION CREATED: ${requestId} for user ${userId}`);
+          console.log(`   Amount: ₦${amount}`);
+          console.log(`   Account: ${result.data.accountNumber}`);
+        }
+      }
+      
       const virtualAccount = new VirtualAccount({
         userId,
         accountNumber: result.data.accountNumber,
@@ -169,6 +219,7 @@ const createDynamicAccount = async (userId, amount) => {
         totalPayable: result.data.totalPayable,
         fee: result.data.fee,
         cashwyreRequestId: requestId,
+        cashwyreReference: result.data.cashwyreReference,
         expiresOn: new Date(result.data.expiresOn),
         expiresOnInMins: result.data.expiresOnInMins,
         active: true
@@ -189,7 +240,8 @@ const createDynamicAccount = async (userId, amount) => {
           expiresOnInMins: result.data.expiresOnInMins,
           amount: result.data.amount,
           totalPayable: result.data.totalPayable,
-          fee: result.data.fee
+          fee: result.data.fee,
+          requestId: requestId
         }
       };
     }
@@ -845,6 +897,8 @@ app.post('/api/payin/check-status', async (req, res) => {
 });
 
 // ==================== SYNC ENDPOINT FOR PHP WEBHOOK ====================
+// In virtual-account-backend/server.js - REPLACE the /api/webhooks/cashwyre-sync endpoint
+
 app.post('/api/webhooks/cashwyre-sync', async (req, res) => {
   const startTime = Date.now();
   console.log('='.repeat(80));
@@ -867,45 +921,50 @@ app.post('/api/webhooks/cashwyre-sync', async (req, res) => {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
     
-    // Check if transaction already processed by reference or cashwyreCode
-    const existingTx = await Transaction.findOne({ 
+    // SEARCH FOR PENDING TRANSACTION FIRST
+    let pendingTransaction = await Transaction.findOne({ 
       $or: [
-        { reference: reference },
+        { reference: cashwyreCode },
         { cashwyreReference: cashwyreCode },
-        { 'metadata.cashwyreCode': cashwyreCode }
-      ]
+        { 'metadata.requestId': cashwyreCode },
+        { reference: reference },
+        { 'metadata.accountNumber': accountNumber }
+      ],
+      status: 'pending'
     });
     
-    if (existingTx) {
-      console.log('⚠️ Transaction already processed:', reference);
-      return res.status(200).json({ 
-        success: true, 
-        message: 'Already processed',
-        newBalance: user.walletBalance,
-        alreadyProcessed: true
+    if (!pendingTransaction) {
+      // Also try to find by account number in metadata
+      pendingTransaction = await Transaction.findOne({
+        userId: userId,
+        'metadata.accountNumber': accountNumber,
+        status: 'pending'
       });
     }
     
-    // Update wallet balance
-    const oldBalance = user.walletBalance;
-    const newBalance = oldBalance + amount;
+    let transaction;
+    let oldBalance;
+    let newBalance;
     
-    user.walletBalance = newBalance;
-    user.updatedAt = new Date();
-    await user.save();
-    
-    // Create transaction record
-    const transaction = new Transaction({
-      userId: user._id,
-      type: type === 'partial_payment' ? 'partial_payment' : 'wallet_funding',
-      amount: amount,
-      previousBalance: oldBalance,
-      newBalance: newBalance,
-      reference: cashwyreCode || reference,
-      cashwyreReference: cashwyreCode,
-      status: 'completed',
-      description: `Cashwyre Deposit from ${bankName || 'Bank Transfer'} - ${accountNumber || ''}`,
-      metadata: {
+    if (pendingTransaction) {
+      console.log('✅ Found pending transaction, updating to completed:', pendingTransaction._id);
+      
+      oldBalance = user.walletBalance;
+      newBalance = oldBalance + amount;
+      
+      user.walletBalance = newBalance;
+      user.updatedAt = new Date();
+      await user.save();
+      
+      // UPDATE existing pending transaction
+      pendingTransaction.status = 'completed';
+      pendingTransaction.newBalance = newBalance;
+      pendingTransaction.previousBalance = oldBalance;
+      pendingTransaction.cashwyreReference = cashwyreCode;
+      pendingTransaction.completedAt = new Date(settledOn || new Date());
+      pendingTransaction.description = `Virtual Account Funding - Payment received from ${bankName || 'Bank Transfer'} - ${accountNumber || ''}`;
+      pendingTransaction.metadata = {
+        ...pendingTransaction.metadata,
         source: 'cashwyre_webhook_sync',
         accountNumber: accountNumber,
         bankName: bankName,
@@ -914,12 +973,71 @@ app.post('/api/webhooks/cashwyre-sync', async (req, res) => {
         amountSettled: amountSettled,
         originalTransactionId: transactionId,
         settledOn: settledOn,
-        cashwyreCode: cashwyreCode
-      },
-      completedAt: new Date(settledOn || new Date())
-    });
-    
-    await transaction.save();
+        cashwyreCode: cashwyreCode,
+        paymentCompletedAt: new Date(),
+        status: 'completed'
+      };
+      
+      transaction = await pendingTransaction.save();
+      console.log(`✅ UPDATED pending transaction to completed: ${transaction._id}`);
+      
+    } else {
+      // Check if already processed (completed transaction exists)
+      const existingCompleted = await Transaction.findOne({ 
+        $or: [
+          { reference: cashwyreCode },
+          { cashwyreReference: cashwyreCode },
+          { 'metadata.cashwyreCode': cashwyreCode }
+        ],
+        status: 'completed'
+      });
+      
+      if (existingCompleted) {
+        console.log('⚠️ Transaction already completed:', cashwyreCode);
+        return res.status(200).json({ 
+          success: true, 
+          message: 'Already processed',
+          newBalance: user.walletBalance,
+          alreadyProcessed: true
+        });
+      }
+      
+      // Create new completed transaction (fallback)
+      oldBalance = user.walletBalance;
+      newBalance = oldBalance + amount;
+      
+      user.walletBalance = newBalance;
+      user.updatedAt = new Date();
+      await user.save();
+      
+      transaction = new Transaction({
+        userId: user._id,
+        type: type === 'partial_payment' ? 'partial_payment' : 'wallet_funding',
+        amount: amount,
+        previousBalance: oldBalance,
+        newBalance: newBalance,
+        reference: cashwyreCode || reference,
+        cashwyreReference: cashwyreCode,
+        status: 'completed',
+        description: `Virtual Account Funding - Payment received from ${bankName || 'Bank Transfer'} - ${accountNumber || ''}`,
+        metadata: {
+          source: 'cashwyre_webhook_sync',
+          accountNumber: accountNumber,
+          bankName: bankName,
+          sourceOfPayment: sourceOfPayment,
+          amountPaid: amountPaid,
+          amountSettled: amountSettled,
+          originalTransactionId: transactionId,
+          settledOn: settledOn,
+          cashwyreCode: cashwyreCode,
+          paymentCompletedAt: new Date()
+        },
+        completedAt: new Date(settledOn || new Date())
+      });
+      
+      await transaction.save();
+      console.log(`✅ Created new completed transaction: ${transaction._id}`);
+    }
     
     const duration = Date.now() - startTime;
     console.log('✅ SYNC SUCCESSFUL!');
@@ -927,7 +1045,7 @@ app.post('/api/webhooks/cashwyre-sync', async (req, res) => {
     console.log('   Amount: ₦' + amount.toFixed(2));
     console.log('   Old Balance: ₦' + oldBalance.toFixed(2));
     console.log('   New Balance: ₦' + newBalance.toFixed(2));
-    console.log('   Cashwyre Code:', cashwyreCode);
+    console.log('   Transaction Status: completed');
     console.log('   Duration:', duration + 'ms');
     console.log('='.repeat(80));
     
@@ -947,6 +1065,58 @@ app.post('/api/webhooks/cashwyre-sync', async (req, res) => {
       success: false, 
       message: error.message 
     });
+  }
+});
+
+
+
+// Add this endpoint to get pending transactions for a user
+app.get('/api/transactions/pending/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    const pendingTransactions = await Transaction.find({
+      userId: userId,
+      status: 'pending'
+    }).sort({ createdAt: -1 });
+    
+    console.log(`📋 Found ${pendingTransactions.length} pending transactions for user ${userId}`);
+    
+    res.json({
+      success: true,
+      transactions: pendingTransactions,
+      count: pendingTransactions.length
+    });
+  } catch (error) {
+    console.error('Error fetching pending transactions:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+
+
+// Add endpoint to get ALL transactions (pending + completed)
+app.get('/api/transactions/all/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { limit = 100, skip = 0 } = req.query;
+    
+    const transactions = await Transaction.find({ userId: userId })
+      .sort({ createdAt: -1 })
+      .limit(parseInt(limit))
+      .skip(parseInt(skip));
+    
+    const total = await Transaction.countDocuments({ userId: userId });
+    
+    res.json({
+      success: true,
+      transactions: transactions,
+      total: total,
+      pagination: { limit: parseInt(limit), skip: parseInt(skip) }
+    });
+  } catch (error) {
+    console.error('Error fetching all transactions:', error);
+    res.status(500).json({ success: false, message: error.message });
   }
 });
 
