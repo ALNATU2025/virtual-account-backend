@@ -927,6 +927,17 @@ app.post('/api/payin/check-status', async (req, res) => {
   }
 });
 
+
+
+
+app.get('/api/webhooks/test', (req, res) => {
+  console.log('✅ TEST WEBHOOK ENDPOINT HIT');
+  console.log('Headers:', JSON.stringify(req.headers, null, 2));
+  console.log('Query:', JSON.stringify(req.query, null, 2));
+  res.json({ success: true, message: 'Webhook endpoint is reachable' });
+});
+
+
 // ==================== SYNC ENDPOINT FOR PHP WEBHOOK ====================
 app.post('/api/webhooks/cashwyre-sync', async (req, res) => {
   // ADD THESE LOGS INSIDE THE ROUTE HANDLER
