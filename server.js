@@ -145,12 +145,12 @@ const cashwyreApiCall = async (endpoint, data) => {
 };
 
 // Create Dynamic Virtual Account
-// REPLACE the entire createDynamicAccount function with this SIMPLE version
+// REPLACE the entire createDynamicAccount function with this
 
 const createDynamicAccount = async (userId, amount) => {
   const requestId = generateRequestId();
   
-  // Calculate YOUR service charge (what you earn)
+  // Calculate YOUR service charge
   let yourServiceCharge;
   if (amount >= 50000) {
     yourServiceCharge = 100;
@@ -158,20 +158,20 @@ const createDynamicAccount = async (userId, amount) => {
     yourServiceCharge = 50;
   }
   
-  // Total to send to Cashwyre = user's amount + your service charge
-  const totalToSend = amount + yourServiceCharge;
+  // Total user pays = amount + your service charge (NO Cashwyre fee added)
+  const userTotalPayable = amount + yourServiceCharge;
   
-  console.log(`💰 SIMPLE FEE BREAKDOWN:`);
+  console.log(`💰 FEE BREAKDOWN:`);
   console.log(`   User wants to fund: ₦${amount}`);
   console.log(`   Your service charge: ₦${yourServiceCharge}`);
-  console.log(`   Total to send to Cashwyre: ₦${totalToSend}`);
-  console.log(`   Cashwyre will add their fee on top`);
-  console.log(`   User will receive: ₦${amount} in wallet`);
+  console.log(`   User will pay: ₦${userTotalPayable}`);
+  console.log(`   User will receive: ₦${amount}`);
+  console.log(`   Cashwyre will deduct their fee from your settlement`);
   
   const payload = {
     appId: CASHWYRE_CONFIG.appId,
     requestId: requestId,
-    Amount: totalToSend,
+    Amount: userTotalPayable,  // Send userTotalPayable to Cashwyre
     businessCode: CASHWYRE_CONFIG.businessCode,
     currency: CASHWYRE_CONFIG.currency
   };
@@ -182,7 +182,7 @@ const createDynamicAccount = async (userId, amount) => {
     const result = await cashwyreApiCall('/Account/createDynamicAccount', payload);
     
     if (result.success) {
-      // Create pending transaction with USER'S amount (what they will get)
+      // Create pending transaction with USER'S amount
       const user = await User.findById(userId);
       if (user) {
         const balanceBefore = user.walletBalance;
@@ -196,7 +196,7 @@ const createDynamicAccount = async (userId, amount) => {
           const pendingTransaction = new Transaction({
             userId: userId,
             type: 'wallet_funding',
-            amount: amount,  // Store what user will receive
+            amount: amount,  // User will receive this amount
             previousBalance: balanceBefore,
             newBalance: balanceBefore,
             reference: requestId,
@@ -209,8 +209,7 @@ const createDynamicAccount = async (userId, amount) => {
               accountName: result.data.accountName,
               bankName: result.data.bankName,
               bankCode: result.data.bankCode,
-              totalPayable: result.data.totalPayable,
-              cashwyreFee: result.data.fee,
+              totalPayable: userTotalPayable,  // What user pays
               yourServiceCharge: yourServiceCharge,
               amountToCredit: amount,
               expiresOn: result.data.expiresOn,
@@ -234,7 +233,7 @@ const createDynamicAccount = async (userId, amount) => {
         bankCode: result.data.bankCode,
         currency: result.data.currency,
         amount: amount,
-        totalPayable: result.data.totalPayable,
+        totalPayable: userTotalPayable,  // This is what user pays
         fee: yourServiceCharge,
         cashwyreRequestId: requestId,
         cashwyreReference: result.data.cashwyreReference,
@@ -246,9 +245,10 @@ const createDynamicAccount = async (userId, amount) => {
       await virtualAccount.save();
       
       console.log(`✅ Virtual account created: ${result.data.accountNumber}`);
-      console.log(`   User will pay: ₦${result.data.totalPayable}`);
-      console.log(`   User will receive: ₦${amount}`);
-      console.log(`   Your earnings: ₦${yourServiceCharge}`);
+      console.log(`   User pays: ₦${userTotalPayable}`);
+      console.log(`   User receives: ₦${amount}`);
+      console.log(`   Your service charge: ₦${yourServiceCharge}`);
+      console.log(`   Cashwyre will deduct their fee from your ₦${userTotalPayable}`);
       
       return {
         success: true,
@@ -259,9 +259,9 @@ const createDynamicAccount = async (userId, amount) => {
           bankCode: result.data.bankCode,
           expiresOn: result.data.expiresOn,
           expiresOnInMins: result.data.expiresOnInMins,
-          amount: amount,  // What user gets
-          totalPayable: result.data.totalPayable,  // What user pays
-          fee: yourServiceCharge,  // Your fee only
+          amount: amount,
+          totalPayable: userTotalPayable,
+          fee: yourServiceCharge,
           requestId: requestId
         }
       };
@@ -272,6 +272,8 @@ const createDynamicAccount = async (userId, amount) => {
     throw error;
   }
 };
+
+
 
 
 // Update Wallet Balance
