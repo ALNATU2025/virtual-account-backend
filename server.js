@@ -150,7 +150,7 @@ const cashwyreApiCall = async (endpoint, data) => {
 const createDynamicAccount = async (userId, amount) => {
   const requestId = generateRequestId();
   
-  // Calculate YOUR service charge
+  // Calculate YOUR service charge (optional - you can set to 0)
   let yourServiceCharge;
   if (amount >= 50000) {
     yourServiceCharge = 100;
@@ -158,7 +158,7 @@ const createDynamicAccount = async (userId, amount) => {
     yourServiceCharge = 50;
   }
   
-  // First, make a test call to get Cashwyre's fee structure
+  // First, call Cashwyre to get their fee structure
   const testPayload = {
     appId: CASHWYRE_CONFIG.appId,
     requestId: requestId,
@@ -168,67 +168,58 @@ const createDynamicAccount = async (userId, amount) => {
   };
   
   try {
-    console.log(`Getting Cashwyre fee structure for amount: ₦${amount + yourServiceCharge}`);
+    console.log(`💰 Calling Cashwyre to get fee for amount: ₦${amount + yourServiceCharge}`);
     
     const result = await cashwyreApiCall('/Account/createDynamicAccount', testPayload);
     
     if (result.success) {
-      // Get Cashwyre's actual fee from response
-      const cashwyreFee = result.data.feeAmount || 0;
-      const cashwyreTotal = result.data.depositAmount || (amount + yourServiceCharge);
+      // Get the ACTUAL fee from Cashwyre response
+      const cashwyreFee = result.data.feeAmount || result.data.fee || 0;
       
-      // Calculate what user must pay
-      // User pays = (amount + yourFee) + cashwyreFee
-      const userTotalPayable = (amount + yourServiceCharge) + cashwyreFee;
+      // Calculate what user MUST pay
+      const userTotalPayable = result.data.depositAmount || (amount + yourServiceCharge + cashwyreFee);
       
-      console.log(`💰 FEE BREAKDOWN:`);
-      console.log(`   User wants: ₦${amount}`);
-      console.log(`   Your fee: ₦${yourServiceCharge}`);
-      console.log(`   Cashwyre fee: ₦${cashwyreFee}`);
-      console.log(`   User MUST pay: ₦${userTotalPayable}`);
-      console.log(`   User receives: ₦${amount}`);
+      console.log(`💰 CASHWYRE FEE BREAKDOWN:`);
+      console.log(`   User wants to fund: ₦${amount}`);
+      console.log(`   Your service charge: ₦${yourServiceCharge}`);
+      console.log(`   Cashwyre processing fee: ₦${cashwyreFee}`);
+      console.log(`   User MUST pay EXACTLY: ₦${userTotalPayable}`);
+      console.log(`   User will receive: ₦${amount}`);
       
-      // Create pending transaction with USER'S amount
+      // Create pending transaction
       const user = await User.findById(userId);
       if (user) {
         const balanceBefore = user.walletBalance;
         
-        const existingPending = await Transaction.findOne({ 
+        const pendingTransaction = new Transaction({
+          userId: userId,
+          type: 'wallet_funding',
+          amount: amount,
+          previousBalance: balanceBefore,
+          newBalance: balanceBefore,
           reference: requestId,
-          status: 'pending'
+          cashwyreReference: result.data.cashwyreReference,
+          status: 'pending',
+          description: `Wallet funding - ₦${amount}`,
+          metadata: {
+            source: 'cashwyre',
+            accountNumber: result.data.accountNumber,
+            accountName: result.data.accountName,
+            bankName: result.data.bankName,
+            bankCode: result.data.bankCode,
+            totalPayable: userTotalPayable,
+            yourServiceCharge: yourServiceCharge,
+            cashwyreFee: cashwyreFee,
+            amountToCredit: amount,
+            expiresOn: result.data.expiresOn,
+            expiresOnInMins: result.data.expiresOnInMins,
+            requestId: requestId,
+          },
+          completedAt: null
         });
         
-        if (!existingPending) {
-          const pendingTransaction = new Transaction({
-            userId: userId,
-            type: 'wallet_funding',
-            amount: amount,
-            previousBalance: balanceBefore,
-            newBalance: balanceBefore,
-            reference: requestId,
-            cashwyreReference: result.data.cashwyreReference,
-            status: 'pending',
-            description: `Wallet funding - ₦${amount}`,
-            metadata: {
-              source: 'cashwyre',
-              accountNumber: result.data.accountNumber,
-              accountName: result.data.accountName,
-              bankName: result.data.bankName,
-              bankCode: result.data.bankCode,
-              totalPayable: userTotalPayable,
-              yourServiceCharge: yourServiceCharge,
-              cashwyreFee: cashwyreFee,
-              amountToCredit: amount,
-              expiresOn: result.data.expiresOn,
-              expiresOnInMins: result.data.expiresOnInMins,
-              requestId: requestId,
-            },
-            completedAt: null
-          });
-          
-          await pendingTransaction.save();
-          console.log(`✅ Pending transaction saved`);
-        }
+        await pendingTransaction.save();
+        console.log(`✅ Pending transaction saved`);
       }
       
       const virtualAccount = new VirtualAccount({
@@ -250,11 +241,9 @@ const createDynamicAccount = async (userId, amount) => {
       
       await virtualAccount.save();
       
-      console.log(`✅ Virtual account: ${result.data.accountNumber}`);
-      console.log(`   User MUST pay EXACTLY: ₦${userTotalPayable}`);
-      console.log(`   User receives: ₦${amount}`);
-      console.log(`   Your earnings: ₦${yourServiceCharge}`);
-      console.log(`   Cashwyre fee: ₦${cashwyreFee}`);
+      console.log(`✅ Virtual account created: ${result.data.accountNumber}`);
+      console.log(`   💰 User MUST pay EXACTLY: ₦${userTotalPayable}`);
+      console.log(`   💰 User receives: ₦${amount}`);
       
       return {
         success: true,
