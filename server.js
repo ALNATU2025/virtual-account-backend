@@ -145,41 +145,48 @@ const cashwyreApiCall = async (endpoint, data) => {
 };
 
 // Create Dynamic Virtual Account
-// REPLACE the entire createDynamicAccount function with this
-
 const createDynamicAccount = async (userId, amount) => {
   const requestId = generateRequestId();
   
-  // NO YOUR SERVICE CHARGE - Set to 0
+  // Your service charge is 0 (user only pays Cashwyre fee)
   const yourServiceCharge = 0;
   
-  // First, call Cashwyre to get their fee structure
-  const testPayload = {
+  // Total to send to Cashwyre = amount user wants + your fee
+  const totalAmount = amount + yourServiceCharge;
+  
+  // Prepare payload for /payin/initiatePayin endpoint
+  const payload = {
     appId: CASHWYRE_CONFIG.appId,
     requestId: requestId,
-    Amount: amount + yourServiceCharge,  // Just the amount user wants
+    amount: totalAmount,
+    currency: CASHWYRE_CONFIG.currency,
     businessCode: CASHWYRE_CONFIG.businessCode,
-    currency: CASHWYRE_CONFIG.currency
+    country: CASHWYRE_CONFIG.country,
+    // For NGN, bankCode is optional
+    // bankCode: "Moniepoint_MFB",
+    // accountNumber: "074000000", // Optional for NGN
+    // accountName: "Customer Name", // Optional for NGN
   };
   
   try {
-    console.log(`💰 Calling Cashwyre to get fee for amount: ₦${amount + yourServiceCharge}`);
+    console.log(`💰 Calling Cashwyre /payin/initiatePayin for amount: ₦${totalAmount}`);
     
-    const result = await cashwyreApiCall('/Account/createDynamicAccount', testPayload);
+    const result = await cashwyreApiCall('/payin/initiatePayin', payload);
     
     if (result.success) {
-      // Get the ACTUAL fee from Cashwyre response
-      const cashwyreFee = result.data.feeAmount || result.data.fee || 0;
+      // Get the fee from Cashwyre response
+      const cashwyreFee = result.data.feeAmount || 0;
       
-      // Calculate what user MUST pay (amount + Cashwyre fee only)
-      const userTotalPayable = result.data.depositAmount || (amount + cashwyreFee);
+      // What user MUST pay = depositAmount (includes Cashwyre fee)
+      const userTotalPayable = result.data.depositAmount || totalAmount;
       
-      console.log(`💰 CASHWYRE FEE BREAKDOWN:`);
+      console.log(`💰 CASHWYRE PAYIN FEE BREAKDOWN:`);
       console.log(`   User wants to fund: ₦${amount}`);
       console.log(`   Cashwyre processing fee: ₦${cashwyreFee}`);
-      console.log(`   User MUST pay EXACTLY: ₦${userTotalPayable}`);
+      console.log(`   User MUST pay: ₦${userTotalPayable}`);
       console.log(`   User will receive: ₦${amount}`);
-      console.log(`   Your service charge: ₦0 (removed)`);
+      console.log(`   Reference: ${result.data.reference}`);
+      console.log(`   Transaction Reference: ${result.data.transactionReference}`);
       
       // Create pending transaction
       const user = await User.findById(userId);
@@ -199,21 +206,20 @@ const createDynamicAccount = async (userId, amount) => {
             previousBalance: balanceBefore,
             newBalance: balanceBefore,
             reference: requestId,
-            cashwyreReference: result.data.cashwyreReference,
+            cashwyreReference: result.data.reference,
             status: 'pending',
             description: `Wallet funding - ₦${amount}`,
             metadata: {
-              source: 'cashwyre',
+              source: 'cashwyre_payin',
               accountNumber: result.data.accountNumber,
               accountName: result.data.accountName,
               bankName: result.data.bankName,
               bankCode: result.data.bankCode,
               totalPayable: userTotalPayable,
-              yourServiceCharge: 0,
               cashwyreFee: cashwyreFee,
               amountToCredit: amount,
-              expiresOn: result.data.expiresOn,
-              expiresOnInMins: result.data.expiresOnInMins,
+              transactionReference: result.data.transactionReference,
+              canConfirmPayin: result.data.canConfirmPayin,
               requestId: requestId,
             },
             completedAt: null
@@ -224,6 +230,7 @@ const createDynamicAccount = async (userId, amount) => {
         }
       }
       
+      // Store virtual account info (for payin, this is the account user pays to)
       const virtualAccount = new VirtualAccount({
         userId,
         accountNumber: result.data.accountNumber,
@@ -233,20 +240,21 @@ const createDynamicAccount = async (userId, amount) => {
         currency: result.data.currency,
         amount: amount,
         totalPayable: userTotalPayable,
-        fee: 0,  // Your fee is 0
+        fee: cashwyreFee,
         cashwyreRequestId: requestId,
-        cashwyreReference: result.data.cashwyreReference,
-        expiresOn: new Date(result.data.expiresOn),
-        expiresOnInMins: result.data.expiresOnInMins,
+        cashwyreReference: result.data.reference,
+        expiresOn: new Date(Date.now() + 60 * 60 * 1000), // 1 hour expiry
+        expiresOnInMins: 60,
         active: true
       });
       
       await virtualAccount.save();
       
-      console.log(`✅ Virtual account created: ${result.data.accountNumber}`);
+      console.log(`✅ Payin initiated: ${result.data.accountNumber} at ${result.data.bankName}`);
       console.log(`   💰 User MUST pay EXACTLY: ₦${userTotalPayable}`);
       console.log(`   💰 User receives: ₦${amount}`);
       console.log(`   💰 Cashwyre fee: ₦${cashwyreFee}`);
+      console.log(`   💰 Reference: ${result.data.reference}`);
       
       return {
         success: true,
@@ -255,12 +263,13 @@ const createDynamicAccount = async (userId, amount) => {
           accountName: result.data.accountName,
           bankName: result.data.bankName,
           bankCode: result.data.bankCode,
-          expiresOn: result.data.expiresOn,
-          expiresOnInMins: result.data.expiresOnInMins,
+          expiresOn: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+          expiresOnInMins: 60,
           amount: amount,
           totalPayable: userTotalPayable,
-          fee: 0,  // Your fee is 0
-          cashwyreFee: cashwyreFee,
+          fee: cashwyreFee,  // Cashwyre's fee
+          reference: result.data.reference,
+          transactionReference: result.data.transactionReference,
           requestId: requestId
         }
       };
