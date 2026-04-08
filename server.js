@@ -80,15 +80,15 @@ const VirtualAccountSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   accountNumber: { type: String, required: true },
   accountName: { type: String, required: true },
-  bankName: { type: String, required: false, default: 'Cashwyre' },  // CHANGE: required: false
-  bankCode: { type: String, required: false },  // CHANGE: required: false
+  bankName: { type: String, required: true },
+  bankCode: { type: String, required: true },
   currency: { type: String, default: 'NGN' },
   amount: { type: Number, required: true },
   totalPayable: { type: Number, required: true },
   fee: { type: Number, required: true },
   cashwyreRequestId: { type: String, required: true, unique: true },
   cashwyreReference: { type: String },
-  expiresOn: { type: Date, required: true },
+  expiresOn: { type: Date, required: true },  // Keep required true, but we now provide it
   expiresOnInMins: { type: Number, required: true },
   active: { type: Boolean, default: true },
   processedAt: { type: Date },
@@ -161,7 +161,7 @@ const createDynamicAccount = async (userId, amount) => {
     currency: CASHWYRE_CONFIG.currency,
     businessCode: CASHWYRE_CONFIG.businessCode,
     country: CASHWYRE_CONFIG.country,
-    feeType: "sender"  // ← ADD THIS - customer pays the fee
+    feeType: "sender"
   };
   
   try {
@@ -176,6 +176,11 @@ const createDynamicAccount = async (userId, amount) => {
       
       // What user MUST pay = depositAmount (includes Cashwyre fee)
       const userTotalPayable = result.data.depositAmount || totalAmount;
+      
+      // Calculate expiresOn - Cashwyre payin typically expires in 1 hour
+      const expiresOn = new Date();
+      expiresOn.setHours(expiresOn.getHours() + 1); // 1 hour from now
+      const expiresOnInMins = 60;
       
       console.log(`💰 CASHWYRE PAYIN RESPONSE:`);
       console.log(`   Account Number: ${result.data.accountNumber}`);
@@ -193,6 +198,7 @@ const createDynamicAccount = async (userId, amount) => {
       console.log(`   Cashwyre processing fee: ₦${cashwyreFee}`);
       console.log(`   User MUST pay: ₦${userTotalPayable}`);
       console.log(`   User will receive: ₦${amount}`);
+      console.log(`   Expires On: ${expiresOn.toISOString()}`);
       
       // Create pending transaction
       const user = await User.findById(userId);
@@ -228,6 +234,8 @@ const createDynamicAccount = async (userId, amount) => {
               feeType: result.data.feeType,
               canConfirmPayin: result.data.canConfirmPayin,
               requestId: requestId,
+              expiresOn: expiresOn,
+              expiresOnInMins: expiresOnInMins
             },
             completedAt: null
           });
@@ -237,7 +245,7 @@ const createDynamicAccount = async (userId, amount) => {
         }
       }
       
-      // Store virtual account info
+      // Store virtual account info - FIXED: Use calculated expiresOn
       const virtualAccount = new VirtualAccount({
         userId,
         accountNumber: result.data.accountNumber,
@@ -250,8 +258,8 @@ const createDynamicAccount = async (userId, amount) => {
         fee: cashwyreFee,
         cashwyreRequestId: requestId,
         cashwyreReference: result.data.reference,
-        expiresOn: new Date(result.data.expiresOn) || new Date(Date.now() + 60 * 60 * 1000),
-        expiresOnInMins: result.data.expiresOnInMins || 60,
+        expiresOn: expiresOn,  // Use calculated date
+        expiresOnInMins: expiresOnInMins,
         active: true
       });
       
@@ -263,6 +271,7 @@ const createDynamicAccount = async (userId, amount) => {
       console.log(`   Reference: ${result.data.reference}`);
       console.log(`   User pays: ₦${userTotalPayable} (includes ₦${cashwyreFee} fee)`);
       console.log(`   User receives: ₦${amount}`);
+      console.log(`   Expires: ${expiresOn.toISOString()}`);
       
       return {
         success: true,
@@ -271,8 +280,8 @@ const createDynamicAccount = async (userId, amount) => {
           accountName: result.data.accountName,
           bankName: result.data.bankName,
           bankCode: result.data.bankCode,
-          expiresOn: result.data.expiresOn,
-          expiresOnInMins: result.data.expiresOnInMins,
+          expiresOn: expiresOn.toISOString(),
+          expiresOnInMins: expiresOnInMins,
           amount: amount,
           totalPayable: userTotalPayable,
           fee: cashwyreFee,
@@ -289,7 +298,6 @@ const createDynamicAccount = async (userId, amount) => {
     throw error;
   }
 };
-
 
 
 // Update Wallet Balance
