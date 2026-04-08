@@ -75,12 +75,13 @@ const TransactionSchema = new mongoose.Schema({
   completedAt: { type: Date, default: Date.now }
 });
 
+// Find this schema in your server.js (around line 80-100)
 const VirtualAccountSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   accountNumber: { type: String, required: true },
   accountName: { type: String, required: true },
-  bankName: { type: String, required: true },
-  bankCode: { type: String, required: true },
+  bankName: { type: String, required: false, default: 'Cashwyre' },  // CHANGE: required: false
+  bankCode: { type: String, required: false },  // CHANGE: required: false
   currency: { type: String, default: 'NGN' },
   amount: { type: Number, required: true },
   totalPayable: { type: Number, required: true },
@@ -148,13 +149,9 @@ const cashwyreApiCall = async (endpoint, data) => {
 const createDynamicAccount = async (userId, amount) => {
   const requestId = generateRequestId();
   
-  // Your service charge is 0 (user only pays Cashwyre fee)
   const yourServiceCharge = 0;
-  
-  // Total to send to Cashwyre = amount user wants + your fee
   const totalAmount = amount + yourServiceCharge;
   
-  // Prepare payload for /payin/initiatePayin endpoint
   const payload = {
     appId: CASHWYRE_CONFIG.appId,
     requestId: requestId,
@@ -162,10 +159,6 @@ const createDynamicAccount = async (userId, amount) => {
     currency: CASHWYRE_CONFIG.currency,
     businessCode: CASHWYRE_CONFIG.businessCode,
     country: CASHWYRE_CONFIG.country,
-    // For NGN, bankCode is optional
-    // bankCode: "Moniepoint_MFB",
-    // accountNumber: "074000000", // Optional for NGN
-    // accountName: "Customer Name", // Optional for NGN
   };
   
   try {
@@ -174,17 +167,13 @@ const createDynamicAccount = async (userId, amount) => {
     const result = await cashwyreApiCall('/payin/initiatePayin', payload);
     
     if (result.success) {
-      // Get the fee from Cashwyre response
       const cashwyreFee = result.data.feeAmount || 0;
-      
-      // What user MUST pay = depositAmount (includes Cashwyre fee)
       const userTotalPayable = result.data.depositAmount || totalAmount;
       
-      console.log(`💰 CASHWYRE PAYIN FEE BREAKDOWN:`);
-      console.log(`   User wants to fund: ₦${amount}`);
-      console.log(`   Cashwyre processing fee: ₦${cashwyreFee}`);
-      console.log(`   User MUST pay: ₦${userTotalPayable}`);
-      console.log(`   User will receive: ₦${amount}`);
+      console.log(`💰 CASHWYRE PAYIN RESPONSE:`);
+      console.log(`   Account Number: ${result.data.accountNumber || 'N/A'}`);
+      console.log(`   Account Name: ${result.data.accountName || 'N/A'}`);
+      console.log(`   Bank Name: ${result.data.bankName || 'Cashwyre'}`);
       console.log(`   Reference: ${result.data.reference}`);
       console.log(`   Transaction Reference: ${result.data.transactionReference}`);
       
@@ -213,7 +202,7 @@ const createDynamicAccount = async (userId, amount) => {
               source: 'cashwyre_payin',
               accountNumber: result.data.accountNumber,
               accountName: result.data.accountName,
-              bankName: result.data.bankName,
+              bankName: result.data.bankName || 'Cashwyre',
               bankCode: result.data.bankCode,
               totalPayable: userTotalPayable,
               cashwyreFee: cashwyreFee,
@@ -230,44 +219,45 @@ const createDynamicAccount = async (userId, amount) => {
         }
       }
       
-      // Store virtual account info (for payin, this is the account user pays to)
+      // Store virtual account info - use defaults for missing fields
       const virtualAccount = new VirtualAccount({
         userId,
         accountNumber: result.data.accountNumber,
         accountName: result.data.accountName,
-        bankName: result.data.bankName,
-        bankCode: result.data.bankCode,
-        currency: result.data.currency,
+        bankName: result.data.bankName || 'Cashwyre',  // Default value
+        bankCode: result.data.bankCode || 'N/A',       // Default value
+        currency: result.data.currency || 'NGN',
         amount: amount,
         totalPayable: userTotalPayable,
         fee: cashwyreFee,
         cashwyreRequestId: requestId,
         cashwyreReference: result.data.reference,
-        expiresOn: new Date(Date.now() + 60 * 60 * 1000), // 1 hour expiry
+        expiresOn: new Date(Date.now() + 60 * 60 * 1000),
         expiresOnInMins: 60,
         active: true
       });
       
       await virtualAccount.save();
       
-      console.log(`✅ Payin initiated: ${result.data.accountNumber} at ${result.data.bankName}`);
-      console.log(`   💰 User MUST pay EXACTLY: ₦${userTotalPayable}`);
-      console.log(`   💰 User receives: ₦${amount}`);
-      console.log(`   💰 Cashwyre fee: ₦${cashwyreFee}`);
-      console.log(`   💰 Reference: ${result.data.reference}`);
+      console.log(`✅ Payin initiated successfully`);
+      console.log(`   Account: ${result.data.accountNumber}`);
+      console.log(`   Reference: ${result.data.reference}`);
+      console.log(`   User pays: ₦${userTotalPayable}`);
+      console.log(`   User receives: ₦${amount}`);
+      console.log(`   Cashwyre fee: ₦${cashwyreFee}`);
       
       return {
         success: true,
         data: {
           accountNumber: result.data.accountNumber,
           accountName: result.data.accountName,
-          bankName: result.data.bankName,
-          bankCode: result.data.bankCode,
+          bankName: result.data.bankName || 'Cashwyre',
+          bankCode: result.data.bankCode || 'N/A',
           expiresOn: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
           expiresOnInMins: 60,
           amount: amount,
           totalPayable: userTotalPayable,
-          fee: cashwyreFee,  // Cashwyre's fee
+          fee: cashwyreFee,
           reference: result.data.reference,
           transactionReference: result.data.transactionReference,
           requestId: requestId
