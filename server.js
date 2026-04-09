@@ -146,18 +146,24 @@ const cashwyreApiCall = async (endpoint, data) => {
 };
 
 // Create Dynamic Virtual Account
+// Create Dynamic Virtual Account with rounded service charge
+// Create Dynamic Virtual Account with simplified user view
 const createDynamicAccount = async (userId, amount) => {
   const requestId = generateRequestId();
   
-  // Your service charge is 0 (user only pays Cashwyre fee)
-  const yourServiceCharge = 0;
-  const totalAmount = amount + yourServiceCharge;
+  // Calculate your platform's service charge based on amount
+  let platformServiceCharge = 0;
+  if (amount >= 50000) {
+    platformServiceCharge = 100;  // ₦100 for amounts ₦50,000 and above
+  } else {
+    platformServiceCharge = 50;   // ₦50 for amounts below ₦50,000
+  }
   
-  // Prepare payload for /payin/initiatePayin endpoint with feeType: "sender"
-  const payload = {
+  // First, get Cashwyre's fee by calling their API with just the amount
+  const tempPayload = {
     appId: CASHWYRE_CONFIG.appId,
-    requestId: requestId,
-    amount: totalAmount,
+    requestId: generateRequestId(),
+    amount: amount,
     currency: CASHWYRE_CONFIG.currency,
     businessCode: CASHWYRE_CONFIG.businessCode,
     country: CASHWYRE_CONFIG.country,
@@ -165,21 +171,57 @@ const createDynamicAccount = async (userId, amount) => {
   };
   
   try {
+    // First call to get Cashwyre's fee
+    const tempResult = await cashwyreApiCall('/payin/initiatePayin', tempPayload);
+    
+    if (!tempResult.success) {
+      throw new Error('Failed to get Cashwyre fee');
+    }
+    
+    const cashwyreFee = tempResult.data.feeAmount || 0;
+    
+    // Calculate total with platform fee
+    const subtotal = amount + platformServiceCharge + cashwyreFee;
+    
+    // ROUND UP to the nearest whole number (no decimals)
+    const totalAmount = Math.ceil(subtotal);
+    
+    // Calculate the rounding adjustment
+    const roundingAdjustment = totalAmount - subtotal;
+    
+    // BACKEND LOGS ONLY - User never sees this
+    console.log(`💰 BACKEND FEE CALCULATION for ₦${amount}:`);
+    console.log(`   Platform Service Charge: ₦${platformServiceCharge}`);
+    console.log(`   Cashwyre Processing Fee (1.5%): ₦${cashwyreFee}`);
+    console.log(`   Subtotal: ₦${subtotal}`);
+    console.log(`   Rounded up to: ₦${totalAmount} (added ₦${roundingAdjustment} rounding)`);
+    
+    // Now make the actual API call with the rounded total amount
+    const finalPayload = {
+      appId: CASHWYRE_CONFIG.appId,
+      requestId: requestId,
+      amount: totalAmount,
+      currency: CASHWYRE_CONFIG.currency,
+      businessCode: CASHWYRE_CONFIG.businessCode,
+      country: CASHWYRE_CONFIG.country,
+      feeType: "sender"
+    };
+    
     console.log(`💰 Calling Cashwyre /payin/initiatePayin for amount: ₦${totalAmount}`);
     console.log(`   feeType: sender (customer pays fee)`);
     
-    const result = await cashwyreApiCall('/payin/initiatePayin', payload);
+    const result = await cashwyreApiCall('/payin/initiatePayin', finalPayload);
     
     if (result.success) {
       // Get the fee from Cashwyre response
-      const cashwyreFee = result.data.feeAmount || 0;
+      const actualCashwyreFee = result.data.feeAmount || 0;
       
       // What user MUST pay = depositAmount (includes Cashwyre fee)
       const userTotalPayable = result.data.depositAmount || totalAmount;
       
       // Calculate expiresOn - Cashwyre payin typically expires in 1 hour
       const expiresOn = new Date();
-      expiresOn.setHours(expiresOn.getHours() + 1); // 1 hour from now
+      expiresOn.setHours(expiresOn.getHours() + 1);
       const expiresOnInMins = 60;
       
       console.log(`💰 CASHWYRE PAYIN RESPONSE:`);
@@ -189,13 +231,15 @@ const createDynamicAccount = async (userId, amount) => {
       console.log(`   Bank Code: ${result.data.bankCode}`);
       console.log(`   Reference: ${result.data.reference}`);
       console.log(`   Transaction Reference: ${result.data.transactionReference}`);
-      console.log(`   Fee Amount: ₦${cashwyreFee}`);
+      console.log(`   Fee Amount: ₦${actualCashwyreFee}`);
       console.log(`   Deposit Amount: ₦${userTotalPayable}`);
       console.log(`   Fee Type: ${result.data.feeType}`);
       
-      console.log(`💰 BREAKDOWN:`);
+      console.log(`💰 FINAL BREAKDOWN:`);
       console.log(`   User wants to fund: ₦${amount}`);
-      console.log(`   Cashwyre processing fee: ₦${cashwyreFee}`);
+      console.log(`   Platform service charge: ₦${platformServiceCharge}`);
+      console.log(`   Cashwyre processing fee: ₦${actualCashwyreFee}`);
+      console.log(`   Rounding adjustment: ₦${roundingAdjustment}`);
       console.log(`   User MUST pay: ₦${userTotalPayable}`);
       console.log(`   User will receive: ₦${amount}`);
       console.log(`   Expires On: ${expiresOn.toISOString()}`);
@@ -228,7 +272,9 @@ const createDynamicAccount = async (userId, amount) => {
               bankName: result.data.bankName,
               bankCode: result.data.bankCode,
               totalPayable: userTotalPayable,
-              cashwyreFee: cashwyreFee,
+              cashwyreFee: actualCashwyreFee,
+              platformServiceCharge: platformServiceCharge,
+              roundingAdjustment: roundingAdjustment,
               amountToCredit: amount,
               transactionReference: result.data.transactionReference,
               feeType: result.data.feeType,
@@ -245,7 +291,7 @@ const createDynamicAccount = async (userId, amount) => {
         }
       }
       
-      // Store virtual account info - FIXED: Use calculated expiresOn
+      // Store virtual account info
       const virtualAccount = new VirtualAccount({
         userId,
         accountNumber: result.data.accountNumber,
@@ -255,10 +301,10 @@ const createDynamicAccount = async (userId, amount) => {
         currency: result.data.currency || 'NGN',
         amount: amount,
         totalPayable: userTotalPayable,
-        fee: cashwyreFee,
+        fee: platformServiceCharge,  // Only show platform fee to user
         cashwyreRequestId: requestId,
         cashwyreReference: result.data.reference,
-        expiresOn: expiresOn,  // Use calculated date
+        expiresOn: expiresOn,
         expiresOnInMins: expiresOnInMins,
         active: true
       });
@@ -269,8 +315,9 @@ const createDynamicAccount = async (userId, amount) => {
       console.log(`   Account: ${result.data.accountNumber}`);
       console.log(`   Bank: ${result.data.bankName}`);
       console.log(`   Reference: ${result.data.reference}`);
-      console.log(`   User pays: ₦${userTotalPayable} (includes ₦${cashwyreFee} fee)`);
+      console.log(`   User pays: ₦${userTotalPayable}`);
       console.log(`   User receives: ₦${amount}`);
+      console.log(`   Service charge: ₦${platformServiceCharge}`);
       console.log(`   Expires: ${expiresOn.toISOString()}`);
       
       return {
@@ -284,7 +331,7 @@ const createDynamicAccount = async (userId, amount) => {
           expiresOnInMins: expiresOnInMins,
           amount: amount,
           totalPayable: userTotalPayable,
-          fee: cashwyreFee,
+          fee: platformServiceCharge,  // Only platform fee
           reference: result.data.reference,
           transactionReference: result.data.transactionReference,
           feeType: result.data.feeType,
