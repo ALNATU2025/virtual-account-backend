@@ -1384,6 +1384,38 @@ app.post('/api/webhooks/cashwyre-fiat', async (req, res) => {
 
 
 
+// Add to server.js - Check sync status
+app.get('/api/sync/status/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.json({ success: false, message: 'User not found' });
+    }
+    
+    const lastTransaction = await Transaction.findOne({ userId: userId })
+      .sort({ completedAt: -1 })
+      .limit(1);
+    
+    res.json({
+      success: true,
+      walletBalance: user.walletBalance,
+      lastTransaction: lastTransaction ? {
+        amount: lastTransaction.amount,
+        status: lastTransaction.status,
+        date: lastTransaction.completedAt,
+        source: lastTransaction.metadata?.source
+      } : null
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+
+
+
 
 
 // ==================== MANUAL BALANCE RECOVERY ENDPOINT ====================
