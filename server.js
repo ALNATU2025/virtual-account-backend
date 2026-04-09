@@ -146,64 +146,26 @@ const cashwyreApiCall = async (endpoint, data) => {
 };
 
 // Create Dynamic Virtual Account
-// Create Dynamic Virtual Account - CORRECTED CALCULATION
+// Create Dynamic Virtual Account - Frontend shows fixed fee, backend calculates adjustment
 const createDynamicAccount = async (userId, amount) => {
   const requestId = generateRequestId();
   
-  // Calculate your platform's service charge based on amount
-  let platformServiceCharge = 0;
+  // FRONTEND DISPLAY FEE (what user sees)
+  let frontendDisplayFee = 0;
   if (amount >= 50000) {
-    platformServiceCharge = 100;  // ₦100 for amounts ₦50,000 and above
+    frontendDisplayFee = 100;  // User sees ₦100 for amounts ₦50,000+
   } else {
-    platformServiceCharge = 50;   // ₦50 for amounts below ₦50,000
+    frontendDisplayFee = 50;   // User sees ₦50 for amounts below ₦50,000
   }
   
-  // Calculate what amount to send to Cashwyre
-  // We want Cashwyre to charge 1.5% on the platform fee + original amount
-  // But we need to ensure the final total is a whole number
+  // Calculate what user should pay TOTAL (what they see in frontend)
+  const userSeesTotalPayable = amount + frontendDisplayFee;
   
-  // Calculate the base amount (what user wants + platform fee)
-  const baseAmount = amount + platformServiceCharge;
-  
-  // Cashwyre will charge 1.5% on whatever amount we send
-  // So if we send X, Cashwyre fee = X * 0.015
-  // User pays = X + (X * 0.015) = X * 1.015
-  // We want user pays = baseAmount (rounded up to whole number)
-  // So X = baseAmount / 1.015
-  
-  const amountToSendToCashwyre = baseAmount / 1.015;
-  
-  // Round up to nearest kobo (2 decimal places) for accurate calculation
-  const roundedAmountToSend = Math.ceil(amountToSendToCashwyre * 100) / 100;
-  
-  // Calculate what Cashwyre will actually charge (1.5% of amount sent)
-  const cashwyreFeeOnSend = roundedAmountToSend * 0.015;
-  
-  // Total user pays = amount sent + Cashwyre fee
-  const userTotalPayable = roundedAmountToSend + cashwyreFeeOnSend;
-  
-  // Round up to whole number for user display
-  const finalUserPayable = Math.ceil(userTotalPayable);
-  
-  // Calculate the rounding adjustment
-  const roundingAdjustment = finalUserPayable - userTotalPayable;
-  
-  // BACKEND LOGS ONLY
-  console.log(`💰 BACKEND FEE CALCULATION for ₦${amount}:`);
-  console.log(`   User wants to fund: ₦${amount}`);
-  console.log(`   Platform Service Charge: ₦${platformServiceCharge}`);
-  console.log(`   Base amount (amount + platform fee): ₦${baseAmount}`);
-  console.log(`   Amount to send to Cashwyre: ₦${roundedAmountToSend}`);
-  console.log(`   Cashwyre will charge 1.5% on ₦${roundedAmountToSend} = ₦${cashwyreFeeOnSend}`);
-  console.log(`   User would pay: ₦${userTotalPayable}`);
-  console.log(`   Rounded up to whole number: ₦${finalUserPayable}`);
-  console.log(`   Rounding adjustment: ₦${roundingAdjustment}`);
-  
-  // Prepare payload for Cashwyre with the calculated amount
+  // Prepare payload for Cashwyre - send the ORIGINAL amount
   const payload = {
     appId: CASHWYRE_CONFIG.appId,
     requestId: requestId,
-    amount: roundedAmountToSend,
+    amount: amount,  // Send original amount (e.g., 100)
     currency: CASHWYRE_CONFIG.currency,
     businessCode: CASHWYRE_CONFIG.businessCode,
     country: CASHWYRE_CONFIG.country,
@@ -211,43 +173,48 @@ const createDynamicAccount = async (userId, amount) => {
   };
   
   try {
-    console.log(`💰 Calling Cashwyre /payin/initiatePayin for amount: ₦${roundedAmountToSend}`);
+    console.log(`💰 Calling Cashwyre /payin/initiatePayin for amount: ₦${amount}`);
     console.log(`   feeType: sender (customer pays fee)`);
     
     const result = await cashwyreApiCall('/payin/initiatePayin', payload);
     
     if (result.success) {
-      // Get the actual fee from Cashwyre response
-      const actualCashwyreFee = result.data.feeAmount || 0;
+      // Cashwyre returns depositAmount (includes their fee)
+      const cashwyreDepositAmount = result.data.depositAmount || amount;
+      const cashwyreFee = result.data.feeAmount || 0;
       
-      // What user MUST pay = depositAmount from Cashwyre
-      const userTotalPayableActual = result.data.depositAmount || finalUserPayable;
+      // BACKEND CALCULATES THE ACTUAL ADJUSTMENT
+      // User should pay total = amount + frontendDisplayFee (e.g., ₦150)
+      // Cashwyre says user pays = cashwyreDepositAmount (e.g., ₦101.50)
+      // So your ACTUAL platform fee = userSeesTotalPayable - cashwyreDepositAmount
+      const actualPlatformFee = userSeesTotalPayable - cashwyreDepositAmount;
+      
+      // The user pays this amount (same as what they see in frontend)
+      const userTotalPayable = userSeesTotalPayable;
+      
+      console.log(`💰 CASHWYRE PAYIN RESPONSE:`);
+      console.log(`   Account Number: ${result.data.accountNumber}`);
+      console.log(`   Account Name: ${result.data.accountName}`);
+      console.log(`   Bank Name: ${result.data.bankName}`);
+      console.log(`   Cashwyre Fee: ₦${cashwyreFee}`);
+      console.log(`   Cashwyre Deposit Amount: ₦${cashwyreDepositAmount}`);
+      
+      console.log(`💰 BACKEND ADJUSTMENT CALCULATION:`);
+      console.log(`   User wants to fund: ₦${amount}`);
+      console.log(`   Frontend shows fee: ₦${frontendDisplayFee}`);
+      console.log(`   User sees total: ₦${userSeesTotalPayable}`);
+      console.log(`   Cashwyre says user pays: ₦${cashwyreDepositAmount}`);
+      console.log(`   Backend adjustment: ₦${actualPlatformFee.toFixed(2)}`);
+      console.log(`   TOTAL USER PAYS: ₦${userTotalPayable}`);
+      console.log(`   User receives: ₦${amount}`);
+      console.log(`   Expires On: ${expiresOn.toISOString()}`);
       
       // Calculate expiresOn - 1 hour from now
       const expiresOn = new Date();
       expiresOn.setHours(expiresOn.getHours() + 1);
       const expiresOnInMins = 60;
       
-      console.log(`💰 CASHWYRE PAYIN RESPONSE:`);
-      console.log(`   Account Number: ${result.data.accountNumber}`);
-      console.log(`   Account Name: ${result.data.accountName}`);
-      console.log(`   Bank Name: ${result.data.bankName}`);
-      console.log(`   Bank Code: ${result.data.bankCode}`);
-      console.log(`   Reference: ${result.data.reference}`);
-      console.log(`   Transaction Reference: ${result.data.transactionReference}`);
-      console.log(`   Fee Amount: ₦${actualCashwyreFee}`);
-      console.log(`   Deposit Amount: ₦${userTotalPayableActual}`);
-      console.log(`   Fee Type: ${result.data.feeType}`);
-      
-      console.log(`💰 FINAL BREAKDOWN:`);
-      console.log(`   User wants to fund: ₦${amount}`);
-      console.log(`   Platform service charge: ₦${platformServiceCharge}`);
-      console.log(`   Cashwyre processing fee (1.5% of ₦${roundedAmountToSend}): ₦${actualCashwyreFee}`);
-      console.log(`   User MUST pay (rounded): ₦${userTotalPayableActual}`);
-      console.log(`   User will receive: ₦${amount}`);
-      console.log(`   Expires On: ${expiresOn.toISOString()}`);
-      
-      // Create pending transaction
+      // Create pending transaction in MongoDB
       const user = await User.findById(userId);
       if (user) {
         const balanceBefore = user.walletBalance;
@@ -274,9 +241,11 @@ const createDynamicAccount = async (userId, amount) => {
               accountName: result.data.accountName,
               bankName: result.data.bankName,
               bankCode: result.data.bankCode,
-              totalPayable: userTotalPayableActual,
-              cashwyreFee: actualCashwyreFee,
-              platformServiceCharge: platformServiceCharge,
+              cashwyreDepositAmount: cashwyreDepositAmount,
+              cashwyreFee: cashwyreFee,
+              frontendDisplayFee: frontendDisplayFee,
+              actualPlatformFee: actualPlatformFee,
+              totalPayable: userTotalPayable,
               amountToCredit: amount,
               transactionReference: result.data.transactionReference,
               feeType: result.data.feeType,
@@ -289,11 +258,11 @@ const createDynamicAccount = async (userId, amount) => {
           });
           
           await pendingTransaction.save();
-          console.log(`✅ Pending transaction saved`);
+          console.log(`✅ Pending transaction saved to MongoDB`);
         }
       }
       
-      // Store virtual account info
+      // Store virtual account info in MongoDB
       const virtualAccount = new VirtualAccount({
         userId,
         accountNumber: result.data.accountNumber,
@@ -302,8 +271,9 @@ const createDynamicAccount = async (userId, amount) => {
         bankCode: result.data.bankCode,
         currency: result.data.currency || 'NGN',
         amount: amount,
-        totalPayable: userTotalPayableActual,
-        fee: platformServiceCharge,
+        totalPayable: userTotalPayable,
+        fee: frontendDisplayFee,  // Store what user sees
+        actualPlatformFee: actualPlatformFee,  // Store actual backend calculation
         cashwyreRequestId: requestId,
         cashwyreReference: result.data.reference,
         expiresOn: expiresOn,
@@ -316,11 +286,10 @@ const createDynamicAccount = async (userId, amount) => {
       console.log(`✅ Payin initiated successfully`);
       console.log(`   Account: ${result.data.accountNumber}`);
       console.log(`   Bank: ${result.data.bankName}`);
-      console.log(`   Reference: ${result.data.reference}`);
-      console.log(`   User pays: ₦${userTotalPayableActual}`);
+      console.log(`   User pays: ₦${userTotalPayable}`);
       console.log(`   User receives: ₦${amount}`);
-      console.log(`   Service charge: ₦${platformServiceCharge}`);
-      console.log(`   Expires: ${expiresOn.toISOString()}`);
+      console.log(`   Frontend shows fee: ₦${frontendDisplayFee}`);
+      console.log(`   Actual backend fee: ₦${actualPlatformFee.toFixed(2)}`);
       
       return {
         success: true,
@@ -332,8 +301,8 @@ const createDynamicAccount = async (userId, amount) => {
           expiresOn: expiresOn.toISOString(),
           expiresOnInMins: expiresOnInMins,
           amount: amount,
-          totalPayable: userTotalPayableActual,
-          fee: platformServiceCharge,
+          totalPayable: userTotalPayable,
+          fee: frontendDisplayFee,  // Send frontend display fee
           reference: result.data.reference,
           transactionReference: result.data.transactionReference,
           feeType: result.data.feeType,
