@@ -161,6 +161,11 @@ const createDynamicAccount = async (userId, amount) => {
   // Calculate what user should pay TOTAL (what they see in frontend)
   const userSeesTotalPayable = amount + frontendDisplayFee;
   
+  // Calculate expiresOn FIRST - before using it
+  const expiresOn = new Date();
+  expiresOn.setHours(expiresOn.getHours() + 1); // 1 hour from now
+  const expiresOnInMins = 60;
+  
   // Prepare payload for Cashwyre - send the ORIGINAL amount
   const payload = {
     appId: CASHWYRE_CONFIG.appId,
@@ -208,11 +213,6 @@ const createDynamicAccount = async (userId, amount) => {
       console.log(`   TOTAL USER PAYS: ₦${userTotalPayable}`);
       console.log(`   User receives: ₦${amount}`);
       console.log(`   Expires On: ${expiresOn.toISOString()}`);
-      
-      // Calculate expiresOn - 1 hour from now
-      const expiresOn = new Date();
-      expiresOn.setHours(expiresOn.getHours() + 1);
-      const expiresOnInMins = 60;
       
       // Create pending transaction in MongoDB
       const user = await User.findById(userId);
@@ -273,7 +273,6 @@ const createDynamicAccount = async (userId, amount) => {
         amount: amount,
         totalPayable: userTotalPayable,
         fee: frontendDisplayFee,  // Store what user sees
-        actualPlatformFee: actualPlatformFee,  // Store actual backend calculation
         cashwyreRequestId: requestId,
         cashwyreReference: result.data.reference,
         expiresOn: expiresOn,
@@ -286,10 +285,12 @@ const createDynamicAccount = async (userId, amount) => {
       console.log(`✅ Payin initiated successfully`);
       console.log(`   Account: ${result.data.accountNumber}`);
       console.log(`   Bank: ${result.data.bankName}`);
+      console.log(`   Reference: ${result.data.reference}`);
       console.log(`   User pays: ₦${userTotalPayable}`);
       console.log(`   User receives: ₦${amount}`);
       console.log(`   Frontend shows fee: ₦${frontendDisplayFee}`);
       console.log(`   Actual backend fee: ₦${actualPlatformFee.toFixed(2)}`);
+      console.log(`   Expires: ${expiresOn.toISOString()}`);
       
       return {
         success: true,
@@ -302,7 +303,7 @@ const createDynamicAccount = async (userId, amount) => {
           expiresOnInMins: expiresOnInMins,
           amount: amount,
           totalPayable: userTotalPayable,
-          fee: frontendDisplayFee,  // Send frontend display fee
+          fee: frontendDisplayFee,
           reference: result.data.reference,
           transactionReference: result.data.transactionReference,
           feeType: result.data.feeType,
@@ -316,6 +317,13 @@ const createDynamicAccount = async (userId, amount) => {
     throw error;
   }
 };
+
+
+
+
+
+
+
 
 
 // Update Wallet Balance
