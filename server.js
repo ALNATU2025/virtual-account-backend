@@ -1658,7 +1658,82 @@ app.post('/api/payments/process-cashwyre-payment', async (req, res) => {
 
 
 
-
+// ============================================
+// FIX: Recover missing balance for existing transactions
+// ============================================
+app.post('/api/admin/recover-missing-balance', async (req, res) => {
+  try {
+    const { userId, reference } = req.body;
+    
+    console.log('🔄 Recovering missing balance for:', reference);
+    
+    // Find the pending/completed transaction
+    const transaction = await Transaction.findOne({
+      $or: [
+        { reference: reference },
+        { cashwyreReference: reference },
+        { 'metadata.cashwyreCode': reference }
+      ]
+    });
+    
+    if (!transaction) {
+      return res.status(404).json({ success: false, message: 'Transaction not found' });
+    }
+    
+    const user = await User.findById(transaction.userId);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+    
+    // Check if balance was already updated
+    if (transaction.newBalance > 0 && transaction.newBalance !== transaction.previousBalance) {
+      return res.json({
+        success: true,
+        message: 'Balance already correct',
+        currentBalance: user.walletBalance,
+        transactionBalance: transaction.newBalance
+      });
+    }
+    
+    // Calculate correct balance
+    const oldBalance = user.walletBalance;
+    const amountToCredit = transaction.amount;
+    const newBalance = oldBalance + amountToCredit;
+    
+    // Update user balance
+    user.walletBalance = newBalance;
+    user.updatedAt = new Date();
+    await user.save();
+    
+    // Update transaction
+    transaction.newBalance = newBalance;
+    transaction.previousBalance = oldBalance;
+    transaction.status = 'completed';
+    transaction.completedAt = new Date();
+    transaction.metadata = {
+      ...transaction.metadata,
+      balanceRecovered: true,
+      recoveredAt: new Date(),
+      oldBalanceBeforeRecovery: oldBalance
+    };
+    await transaction.save();
+    
+    console.log(`✅ Recovered ₦${amountToCredit} for user ${user.email}`);
+    console.log(`💰 Balance: ₦${oldBalance} → ₦${newBalance}`);
+    
+    res.json({
+      success: true,
+      amountRecovered: amountToCredit,
+      oldBalance: oldBalance,
+      newBalance: newBalance,
+      message: 'Balance recovered successfully'
+    });
+    
+  } catch (error) {
+    console.error('Recovery error:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
 
 
 
