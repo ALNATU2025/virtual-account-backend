@@ -1209,9 +1209,9 @@ app.post('/api/webhooks/cashwyre-process', async (req, res) => {
     res.status(200).json({ success: true, message: 'Processing' });
     
     try {
-        const { type, eventData, cashwyreCode, amountPaid, accountNumber, status, settledOn, sourceOfPayment, bankName } = req.body;
+        const { type, eventData, cashwyreCode, amountPaid, accountNumber, status, settledOn, sourceOfPayment, bankName, isOverpaid } = req.body;
         
-        console.log(`📋 Processing: Type=${type}, Account=${accountNumber}, Amount=₦${amountPaid}, Status=${status}`);
+        console.log(`📋 Processing: Type=${type}, Account=${accountNumber}, Amount=₦${amountPaid}, Status=${status}, isOverpaid=${isOverpaid}`);
         
         if (type === 'ngn_wallet_funding') {
             // Find virtual account in MongoDB by account number
@@ -1234,6 +1234,7 @@ app.post('/api/webhooks/cashwyre-process', async (req, res) => {
             }
             
             const oldBalance = user.walletBalance;
+            // CREDIT THE ORIGINAL AMOUNT (what user wanted to fund)
             const creditAmount = virtualAccount.amount;
             const newBalance = oldBalance + creditAmount;
             
@@ -1255,13 +1256,14 @@ app.post('/api/webhooks/cashwyre-process', async (req, res) => {
                 reference: cashwyreCode,
                 cashwyreReference: cashwyreCode,
                 status: 'completed',
-                description: `Virtual Account Funding - ₦${creditAmount} credited to wallet`,
+                description: `Virtual Account Funding - ₦${creditAmount} credited to wallet${status === 'OVERPAID' ? ' (Overpaid - credited original amount)' : ''}`,
                 metadata: {
                     source: 'cashwyre_webhook',
                     accountNumber: accountNumber,
                     amountPaid: amountPaid,
                     status: status,
-                    settledOn: settledOn
+                    settledOn: settledOn,
+                    isOverpaid: isOverpaid || false
                 },
                 completedAt: new Date(settledOn || new Date())
             });
@@ -1269,13 +1271,14 @@ app.post('/api/webhooks/cashwyre-process', async (req, res) => {
             await transaction.save();
             
             console.log(`✅ User ${user.email} credited: ₦${creditAmount}`);
-            console.log(`💰 New balance: ₦${newBalance}`);
+            console.log(`💰 Old balance: ₦${oldBalance}, New balance: ₦${newBalance}`);
+            console.log(`📝 Status: ${status} - Credited original amount: ₦${creditAmount}`);
         }
     } catch (error) {
         console.error('NGN webhook error:', error.message);
+        console.error('Stack:', error.stack);
     }
 });
-
 
 
 
