@@ -19,31 +19,23 @@ const CASHWYRE_CONFIG = {
 };
 
 // ==================== RAW BODY MIDDLEWARE ====================
-app.use((req, res, next) => {
-  if (req.originalUrl.startsWith('/api/webhooks')) {
-    let data = [];
-    req.on('data', chunk => data.push(chunk));
-    req.on('end', () => {
-      req.rawBody = Buffer.concat(data);
-      next();
-    });
-  } else {
-    next();
+app.use(express.json({
+  limit: '10mb',
+  verify: (req, res, buf) => {
+    if (req.originalUrl.startsWith('/api/webhooks')) {
+      req.rawBody = buf.toString();
+    }
   }
-});
+}));
+
+app.use(express.urlencoded({ extended: true }));
 
 // ==================== CORS ====================
 app.use(cors({ origin: true, credentials: true }));
 app.options('*', cors());
 
 // ==================== JSON PARSER ====================
-app.use((req, res, next) => {
-  if (req.rawBody) {
-    return next();
-  }
-  express.json({ limit: '10mb' })(req, res, next);
-});
-app.use(express.urlencoded({ extended: true }));
+
 
 // ==================== MONGODB MODELS ====================
 const UserSchema = new mongoose.Schema({
