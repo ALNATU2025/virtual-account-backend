@@ -1739,6 +1739,193 @@ app.post('/api/admin/recover-missing-balance', async (req, res) => {
 
 
 
+// ============================================
+// RECOVER MISSING BALANCE - FOR ALL USERS
+// ============================================
+app.post('/api/recover-missing-balance', async (req, res) => {
+  try {
+    const { userId, reference } = req.body;
+    
+    console.log('🔄 User requested balance recovery for:', reference);
+    console.log('   User ID:', userId);
+    
+    // Validate input
+    if (!reference) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Transaction reference is required' 
+      });
+    }
+    
+    // Find the transaction
+    const transaction = await Transaction.findOne({
+      $or: [
+        { reference: reference },
+        { cashwyreReference: reference },
+        { 'metadata.cashwyreCode': reference },
+        { 'metadata.requestId': reference },
+        { 'metadata.transactionReference': reference }
+      ]
+    });
+    
+    if (!transaction) {
+      // Also check VirtualAccount table
+      const virtualAccount = await VirtualAccount.findOne({
+        $or: [
+          { cashwyreRequestId: reference },
+          { cashwyreReference: reference },
+          { reference: reference }
+        ]
+      });
+      
+      if (!virtualAccount) {
+        return res.status(404).json({ 
+          success: false, 
+          message: 'Transaction not found. Please check your reference and try again.' 
+        });
+      }
+      
+      // Create transaction from virtual account if not exists
+      const user = await User.findById(virtualAccount.userId);
+      if (!user) {
+        return res.status(404).json({ 
+          success: false, 
+          message: 'User not found for this transaction' 
+        });
+      }
+      
+      // Check if user owns this transaction
+      if (userId && user._id.toString() !== userId.toString()) {
+        return res.status(403).json({ 
+          success: false, 
+          message: 'This transaction does not belong to your account.' 
+        });
+      }
+      
+      const oldBalance = user.walletBalance;
+      const amountToCredit = virtualAccount.amount;
+      const newBalance = oldBalance + amountToCredit;
+      
+      // Update user balance
+      user.walletBalance = newBalance;
+      user.updatedAt = new Date();
+      await user.save();
+      
+      // Mark virtual account as processed
+      virtualAccount.active = false;
+      virtualAccount.processedAt = new Date();
+      virtualAccount.cashwyreReference = reference;
+      await virtualAccount.save();
+      
+      // Create transaction record
+      const newTransaction = new Transaction({
+        userId: user._id,
+        type: 'wallet_funding',
+        amount: amountToCredit,
+        previousBalance: oldBalance,
+        newBalance: newBalance,
+        reference: reference,
+        cashwyreReference: reference,
+        status: 'completed',
+        description: `Recovered transaction - ₦${amountToCredit} credited to wallet`,
+        metadata: {
+          source: 'user_balance_recovery',
+          recoveredAt: new Date(),
+          oldBalanceBeforeRecovery: oldBalance,
+          originalReference: reference
+        },
+        completedAt: new Date()
+      });
+      
+      await newTransaction.save();
+      
+      console.log(`✅ Recovered ₦${amountToCredit} for user ${user.email}`);
+      console.log(`💰 Balance: ₦${oldBalance} → ₦${newBalance}`);
+      
+      return res.json({
+        success: true,
+        amountRecovered: amountToCredit,
+        oldBalance: oldBalance,
+        newBalance: newBalance,
+        message: `Successfully recovered ₦${amountToCredit.toFixed(2)} to your wallet!`
+      });
+    }
+    
+    // Transaction exists, check ownership
+    if (userId && transaction.userId.toString() !== userId.toString()) {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'This transaction does not belong to your account.' 
+      });
+    }
+    
+    const user = await User.findById(transaction.userId);
+    if (!user) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'User not found for this transaction' 
+      });
+    }
+    
+    // Check if balance was already updated
+    if (transaction.newBalance > 0 && transaction.newBalance !== transaction.previousBalance) {
+      return res.json({
+        success: true,
+        alreadyProcessed: true,
+        message: 'This transaction was already credited to your wallet.',
+        currentBalance: user.walletBalance,
+        amount: transaction.amount,
+        transactionBalance: transaction.newBalance
+      });
+    }
+    
+    // Calculate correct balance
+    const oldBalance = user.walletBalance;
+    const amountToCredit = transaction.amount;
+    const newBalance = oldBalance + amountToCredit;
+    
+    // Update user balance
+    user.walletBalance = newBalance;
+    user.updatedAt = new Date();
+    await user.save();
+    
+    // Update transaction
+    transaction.newBalance = newBalance;
+    transaction.previousBalance = oldBalance;
+    transaction.status = 'completed';
+    transaction.completedAt = new Date();
+    transaction.metadata = {
+      ...transaction.metadata,
+      balanceRecovered: true,
+      recoveredAt: new Date(),
+      oldBalanceBeforeRecovery: oldBalance,
+      recoveredBy: userId || 'user'
+    };
+    await transaction.save();
+    
+    console.log(`✅ Recovered ₦${amountToCredit} for user ${user.email}`);
+    console.log(`💰 Balance: ₦${oldBalance} → ₦${newBalance}`);
+    
+    res.json({
+      success: true,
+      amountRecovered: amountToCredit,
+      oldBalance: oldBalance,
+      newBalance: newBalance,
+      message: `Successfully recovered ₦${amountToCredit.toFixed(2)} to your wallet!`
+    });
+    
+  } catch (error) {
+    console.error('Recovery error:', error.message);
+    res.status(500).json({ 
+      success: false, 
+      message: 'An error occurred while recovering your transaction. Please try again or contact support.' 
+    });
+  }
+});
+
+
+
+
 
 // ==================== MANUAL BALANCE RECOVERY ENDPOINT ====================
 app.post('/api/admin/recover-payment', async (req, res) => {
