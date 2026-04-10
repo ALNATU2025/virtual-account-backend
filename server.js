@@ -1479,6 +1479,192 @@ app.get('/api/sync/status/:userId', async (req, res) => {
 
 
 
+
+
+
+
+
+
+
+// ============================================
+// CHECK CASHWYRE TRANSACTION IN MONGODB
+// ============================================
+app.get('/api/payments/check-cashwyre-transaction/:reference', async (req, res) => {
+  try {
+    const { reference } = req.params;
+    const { userId } = req.query;
+    
+    console.log('🔍 Checking Cashwyre transaction:', reference);
+    
+    // Search in VirtualAccount table
+    const virtualAccount = await VirtualAccount.findOne({
+      $or: [
+        { cashwyreRequestId: reference },
+        { cashwyreReference: reference },
+        { reference: reference }
+      ]
+    });
+    
+    if (virtualAccount) {
+      // Check if already processed
+      const existingTransaction = await Transaction.findOne({
+        $or: [
+          { cashwyreReference: reference },
+          { reference: reference }
+        ],
+        status: 'completed'
+      });
+      
+      return res.json({
+        exists: true,
+        alreadyProcessed: existingTransaction != null,
+        userId: virtualAccount.userId,
+        amount: virtualAccount.amount,
+        totalPayable: virtualAccount.totalPayable,
+        status: existingTransaction ? 'completed' : 'pending',
+        expiresOn: virtualAccount.expiresOn
+      });
+    }
+    
+    // Search in Transaction table
+    const transaction = await Transaction.findOne({
+      $or: [
+        { reference: reference },
+        { cashwyreReference: reference }
+      ]
+    });
+    
+    if (transaction) {
+      return res.json({
+        exists: true,
+        alreadyProcessed: transaction.status === 'completed',
+        userId: transaction.userId,
+        amount: transaction.amount,
+        status: transaction.status
+      });
+    }
+    
+    res.json({ exists: false });
+    
+  } catch (error) {
+    console.error('Check transaction error:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// ============================================
+// PROCESS CASHWYRE PAYMENT AND CREDIT USER
+// ============================================
+app.post('/api/payments/process-cashwyre-payment', async (req, res) => {
+  try {
+    const { userId, reference, amount, depositAmount, feeAmount, isPartial, isOverpaid, source } = req.body;
+    
+    console.log('💰 Processing Cashwyre payment credit:');
+    console.log('   User ID:', userId);
+    console.log('   Reference:', reference);
+    console.log('   Amount to credit: ₦${amount}');
+    console.log('   Deposit Amount: ₦${depositAmount}');
+    console.log('   Fee Amount: ₦${feeAmount}');
+    
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+    
+    // Check if already processed
+    const existingTx = await Transaction.findOne({
+      $or: [
+        { reference: reference },
+        { cashwyreReference: reference }
+      ]
+    });
+    
+    if (existingTx && existingTx.status === 'completed') {
+      return res.json({
+        success: true,
+        alreadyProcessed: true,
+        newBalance: user.walletBalance,
+        message: 'Transaction already processed'
+      });
+    }
+    
+    const oldBalance = user.walletBalance;
+    const creditAmount = amount; // Credit the original amount
+    const newBalance = oldBalance + creditAmount;
+    
+    // Update user balance
+    user.walletBalance = newBalance;
+    user.updatedAt = new Date();
+    await user.save();
+    
+    // Update virtual account if exists
+    const virtualAccount = await VirtualAccount.findOne({
+      $or: [
+        { cashwyreRequestId: reference },
+        { cashwyreReference: reference },
+        { reference: reference }
+      ]
+    });
+    
+    if (virtualAccount) {
+      virtualAccount.active = false;
+      virtualAccount.processedAt = new Date();
+      virtualAccount.cashwyreReference = reference;
+      await virtualAccount.save();
+    }
+    
+    // Create transaction record
+    const transaction = new Transaction({
+      userId: user._id,
+      type: 'wallet_funding',
+      amount: creditAmount,
+      previousBalance: oldBalance,
+      newBalance: newBalance,
+      reference: reference,
+      cashwyreReference: reference,
+      status: 'completed',
+      description: `Cashwyre Virtual Account Funding - ₦${creditAmount} credited to wallet${isPartial ? ' (Partial payment)' : ''}${isOverpaid ? ' (Overpaid - credited original)' : ''}`,
+      metadata: {
+        source: source || 'transaction_validation_page',
+        depositAmount: depositAmount,
+        feeAmount: feeAmount,
+        isPartial: isPartial || false,
+        isOverpaid: isOverpaid || false,
+        verifiedAt: new Date()
+      },
+      completedAt: new Date()
+    });
+    
+    await transaction.save();
+    
+    console.log(`✅ User ${user.email} credited: ₦${creditAmount}`);
+    console.log(`💰 New balance: ₦${newBalance}`);
+    
+    res.json({
+      success: true,
+      newBalance: newBalance,
+      amount: creditAmount,
+      message: 'Payment processed successfully'
+    });
+    
+  } catch (error) {
+    console.error('Process payment error:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+
+
+
+
+
+
+
+
+
+
+
+
 // ==================== MANUAL BALANCE RECOVERY ENDPOINT ====================
 app.post('/api/admin/recover-payment', async (req, res) => {
   try {
