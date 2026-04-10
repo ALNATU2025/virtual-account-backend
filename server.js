@@ -1492,6 +1492,76 @@ app.get('/api/admin/pending-transactions', async (req, res) => {
 
 
 
+
+// ==================== FORCE BALANCE REFRESH FOR FLUTTER APP ====================
+app.post('/api/wallet/force-refresh', async (req, res) => {
+  try {
+    const { userId } = req.body;
+    
+    if (!userId) {
+      return res.status(400).json({ success: false, message: 'User ID required' });
+    }
+    
+    console.log(`🔄 Force balance refresh requested for user: ${userId}`);
+    
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+    
+    // Get the last 5 transactions for this user
+    const recentTransactions = await Transaction.find({ userId: userId })
+      .sort({ completedAt: -1 })
+      .limit(5);
+    
+    res.json({
+      success: true,
+      walletBalance: user.walletBalance,
+      commissionBalance: user.commissionBalance,
+      lastTransaction: recentTransactions.length > 0 ? {
+        amount: recentTransactions[0].amount,
+        type: recentTransactions[0].type,
+        status: recentTransactions[0].status,
+        date: recentTransactions[0].completedAt,
+        reference: recentTransactions[0].reference
+      } : null,
+      transactions: recentTransactions,
+      message: 'Balance refreshed successfully'
+    });
+    
+  } catch (error) {
+    console.error('Force refresh error:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// ==================== GET LATEST TRANSACTIONS ====================
+app.get('/api/transactions/latest/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { limit = 10 } = req.query;
+    
+    const transactions = await Transaction.find({ userId: userId })
+      .sort({ completedAt: -1 })
+      .limit(parseInt(limit));
+    
+    res.json({
+      success: true,
+      transactions: transactions,
+      count: transactions.length
+    });
+    
+  } catch (error) {
+    console.error('Error fetching latest transactions:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+
+
+
+
+
 // ==================== START SERVER ====================
 const PORT = process.env.PORT || 3000;
 
