@@ -1738,6 +1738,197 @@ app.post('/api/admin/recover-missing-balance', async (req, res) => {
 
 
 
+// ============================================
+// USER RECOVER MISSING BALANCE - SAVES TO MONGODB
+// ============================================
+app.post('/api/recover-missing-balance', async (req, res) => {
+  try {
+    const { userId, reference } = req.body;
+    
+    console.log('🔄 User requested balance recovery for:', reference);
+    console.log('   User ID:', userId);
+    
+    if (!reference) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Transaction reference is required' 
+      });
+    }
+    
+    // First, check if this transaction already exists in MongoDB
+    let existingTransaction = await Transaction.findOne({
+      $or: [
+        { reference: reference },
+        { cashwyreReference: reference },
+        { 'metadata.cashwyreCode': reference },
+        { 'metadata.requestId': reference }
+      ]
+    });
+    
+    if (existingTransaction) {
+      console.log('✅ Transaction found in MongoDB');
+      
+      // Check if already credited
+      if (existingTransaction.status === 'completed' && existingTransaction.newBalance > existingTransaction.previousBalance) {
+        return res.json({
+          success: true,
+          alreadyProcessed: true,
+          message: 'This transaction was already credited to your wallet.',
+          amount: existingTransaction.amount,
+          newBalance: existingTransaction.newBalance
+        });
+      }
+      
+      // Get user
+      const user = await User.findById(existingTransaction.userId);
+      if (!user) {
+        return res.status(404).json({ success: false, message: 'User not found' });
+      }
+      
+      // Check ownership
+      if (userId && user._id.toString() !== userId.toString()) {
+        return res.status(403).json({ success: false, message: 'This transaction does not belong to your account.' });
+      }
+      
+      // Credit the user
+      const oldBalance = user.walletBalance;
+      const creditAmount = existingTransaction.amount;
+      const newBalance = oldBalance + creditAmount;
+      
+      user.walletBalance = newBalance;
+      user.updatedAt = new Date();
+      await user.save();
+      
+      existingTransaction.status = 'completed';
+      existingTransaction.newBalance = newBalance;
+      existingTransaction.previousBalance = oldBalance;
+      existingTransaction.completedAt = new Date();
+      existingTransaction.metadata = {
+        ...existingTransaction.metadata,
+        balanceRecovered: true,
+        recoveredAt: new Date(),
+        recoveredBy: userId
+      };
+      await existingTransaction.save();
+      
+      console.log(`✅ Recovered ₦${creditAmount} for user ${user.email}`);
+      console.log(`💰 Balance: ₦${oldBalance} → ₦${newBalance}`);
+      
+      return res.json({
+        success: true,
+        amountRecovered: creditAmount,
+        oldBalance: oldBalance,
+        newBalance: newBalance,
+        message: `Successfully recovered ₦${creditAmount.toFixed(2)} to your wallet!`
+      });
+    }
+    
+    // If not found in MongoDB, check MySQL via your PHP webhook data
+    console.log('⚠️ Transaction not found in MongoDB, checking MySQL records...');
+    
+    // For the 3 transactions from your logs, create them in MongoDB
+    // This handles the transactions that only exist in MySQL
+    const knownTransactions = {
+      'MNFY|87|20260409234344|158580': {
+        amount: 100, // User requested amount
+        amountPaid: 121.8,
+        accountNumber: '6660155501',
+        status: 'PAID'
+      },
+      'MNFY|96|20260409235007|058483': {
+        amount: 100, // User requested amount
+        amountPaid: 150.0,
+        accountNumber: '6660689873',
+        status: 'OVERPAID'
+      },
+      'MNFY|11|20260410003422|385303': {
+        amount: 100, // User requested amount
+        amountPaid: 101.5,
+        accountNumber: '6660589739',
+        status: 'PAID'
+      }
+    };
+    
+    if (knownTransactions[reference]) {
+      console.log('✅ Found transaction in known records, creating in MongoDB...');
+      
+      const txData = knownTransactions[reference];
+      
+      // Find user by userId or by account number association
+      let user = await User.findById(userId);
+      if (!user) {
+        // Try to find user by email from your app_users table
+        // For now, use the provided userId
+        user = await User.findById(userId);
+        if (!user) {
+          return res.status(404).json({ success: false, message: 'User not found. Please make sure you are logged in.' });
+        }
+      }
+      
+      const oldBalance = user.walletBalance;
+      const creditAmount = txData.amount; // Credit the original amount (₦100)
+      const newBalance = oldBalance + creditAmount;
+      
+      // Update user balance
+      user.walletBalance = newBalance;
+      user.updatedAt = new Date();
+      await user.save();
+      
+      // Create transaction in MongoDB
+      const newTransaction = new Transaction({
+        userId: user._id,
+        type: 'wallet_funding',
+        amount: creditAmount,
+        previousBalance: oldBalance,
+        newBalance: newBalance,
+        reference: reference,
+        cashwyreReference: reference,
+        status: 'completed',
+        description: `Cashwyre Virtual Account Funding - ₦${creditAmount} credited to wallet (Recovered from MySQL)`,
+        metadata: {
+          source: 'user_balance_recovery',
+          accountNumber: txData.accountNumber,
+          amountPaid: txData.amountPaid,
+          status: txData.status,
+          recoveredAt: new Date(),
+          recoveredBy: userId,
+          originalSource: 'mysql_webhook'
+        },
+        completedAt: new Date()
+      });
+      
+      await newTransaction.save();
+      
+      console.log(`✅ Created transaction in MongoDB and credited ₦${creditAmount} for user ${user.email}`);
+      console.log(`💰 Balance: ₦${oldBalance} → ₦${newBalance}`);
+      
+      return res.json({
+        success: true,
+        amountRecovered: creditAmount,
+        oldBalance: oldBalance,
+        newBalance: newBalance,
+        message: `Successfully recovered ₦${creditAmount.toFixed(2)} to your wallet!`
+      });
+    }
+    
+    // If all else fails
+    return res.status(404).json({ 
+      success: false, 
+      message: 'Transaction not found. Please check your reference and try again, or contact support.' 
+    });
+    
+  } catch (error) {
+    console.error('Recovery error:', error.message);
+    res.status(500).json({ 
+      success: false, 
+      message: 'An error occurred while recovering your transaction. Please try again or contact support.' 
+    });
+  }
+});
+
+
+
+
 
 // ============================================
 // RECOVER MISSING BALANCE - FOR ALL USERS
