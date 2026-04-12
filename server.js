@@ -2387,6 +2387,31 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/cashwyre_
     } catch (err) {
       console.log('Index cleanup warning:', err.message);
     }
+
+
+
+
+
+  // Test endpoint for PHP to Node.js connection
+app.post('/api/webhooks/test-forward', (req, res) => {
+  console.log('🧪🧪🧪 TEST WEBHOOK FORWARDING RECEIVED 🧪🧪🧪');
+  console.log('Time:', new Date().toISOString());
+  console.log('Headers:', JSON.stringify(req.headers, null, 2));
+  console.log('Body:', JSON.stringify(req.body, null, 2));
+  console.log('🧪🧪🧪 END TEST 🧪🧪🧪');
+  
+  res.json({ 
+    success: true, 
+    message: 'Test webhook received successfully!',
+    receivedAt: new Date().toISOString(),
+    echo: req.body
+  });
+});
+
+
+
+
+    
     
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`Server running on port ${PORT}`);
