@@ -1191,22 +1191,22 @@ app.get('/api/transactions/all/:userId', async (req, res) => {
 
 
 // ============================================
-// PROCESS NGN (MOBILE APP) CASHWYRE WEBHOOKS
+// PROCESS CASHWYRE WEBHOOKS - BOTH SLE AND MOBILE
 // ============================================
 app.post('/api/webhooks/cashwyre-process', async (req, res) => {
-    console.log('💰 NGN Cashwyre webhook received by Node.js');
+    console.log('💰💰💰 CASHWYRE WEBHOOK RECEIVED BY NODE.JS 💰💰💰');
+    console.log('Time:', new Date().toISOString());
     console.log('Body:', JSON.stringify(req.body, null, 2));
     
-    // Send immediate response
     res.status(200).json({ success: true, message: 'Processing' });
     
     try {
-        const { type, eventData, cashwyreCode, amountPaid, accountNumber, status, settledOn, sourceOfPayment, bankName, isOverpaid } = req.body;
+        const { type, cashwyreCode, amountPaid, accountNumber, status, bankName, settledOn, isOverpaid } = req.body;
         
-        console.log(`📋 Processing: Type=${type}, Account=${accountNumber}, Amount=₦${amountPaid}, Status=${status}, isOverpaid=${isOverpaid}`);
-        
+        // For mobile app (NGN) transactions
         if (type === 'ngn_wallet_funding') {
-            // Find virtual account in MongoDB by account number
+            console.log(`📱 Processing MOBILE APP transaction for account: ${accountNumber}`);
+            
             const virtualAccount = await VirtualAccount.findOne({ 
                 accountNumber: accountNumber,
                 active: true
@@ -1217,17 +1217,14 @@ app.post('/api/webhooks/cashwyre-process', async (req, res) => {
                 return;
             }
             
-            console.log('✅ Found virtual account for user:', virtualAccount.userId);
-            
             const user = await User.findById(virtualAccount.userId);
             if (!user) {
                 console.log('❌ User not found:', virtualAccount.userId);
                 return;
             }
             
-            const oldBalance = user.walletBalance;
-            // CREDIT THE ORIGINAL AMOUNT (what user wanted to fund)
             const creditAmount = virtualAccount.amount;
+            const oldBalance = user.walletBalance;
             const newBalance = oldBalance + creditAmount;
             
             user.walletBalance = newBalance;
@@ -1239,36 +1236,34 @@ app.post('/api/webhooks/cashwyre-process', async (req, res) => {
             virtualAccount.cashwyreReference = cashwyreCode;
             await virtualAccount.save();
             
-            const transaction = new Transaction({
-                userId: user._id,
-                type: 'wallet_funding',
-                amount: creditAmount,
-                previousBalance: oldBalance,
-                newBalance: newBalance,
-                reference: cashwyreCode,
-                cashwyreReference: cashwyreCode,
-                status: 'completed',
-                description: `Virtual Account Funding - ₦${creditAmount} credited to wallet${status === 'OVERPAID' ? ' (Overpaid - credited original amount)' : ''}`,
-                metadata: {
-                    source: 'cashwyre_webhook',
-                    accountNumber: accountNumber,
-                    amountPaid: amountPaid,
-                    status: status,
-                    settledOn: settledOn,
-                    isOverpaid: isOverpaid || false
-                },
-                completedAt: new Date(settledOn || new Date())
+            // Update pending transaction
+            let pendingTransaction = await Transaction.findOne({ 
+                userId: virtualAccount.userId,
+                status: 'pending',
+                'metadata.accountNumber': accountNumber
             });
             
-            await transaction.save();
+            if (pendingTransaction) {
+                pendingTransaction.status = 'completed';
+                pendingTransaction.newBalance = newBalance;
+                pendingTransaction.previousBalance = oldBalance;
+                pendingTransaction.cashwyreReference = cashwyreCode;
+                pendingTransaction.completedAt = new Date(settledOn || new Date());
+                await pendingTransaction.save();
+            }
             
-            console.log(`✅ User ${user.email} credited: ₦${creditAmount}`);
-            console.log(`💰 Old balance: ₦${oldBalance}, New balance: ₦${newBalance}`);
-            console.log(`📝 Status: ${status} - Credited original amount: ₦${creditAmount}`);
+            console.log(`✅ Mobile user ${user.email} credited: ₦${creditAmount}`);
+            console.log(`💰 Balance: ₦${oldBalance} → ₦${newBalance}`);
         }
+        
+        // For SLE (website) sync - just log it
+        else if (type === 'sle_wallet_funding') {
+            console.log(`💻 SLE transaction sync received for user: ${req.body.userId}`);
+            console.log(`   Amount: ₦${req.body.amount}`);
+        }
+        
     } catch (error) {
-        console.error('NGN webhook error:', error.message);
-        console.error('Stack:', error.stack);
+        console.error('❌ Webhook error:', error.message);
     }
 });
 
