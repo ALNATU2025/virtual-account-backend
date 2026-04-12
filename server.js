@@ -1929,6 +1929,70 @@ app.post('/api/recover-missing-balance', async (req, res) => {
 
 
 
+// ============================================
+// CREATE PENDING TRANSACTION (When user initiates funding)
+// ============================================
+app.post('/api/transactions/create-pending', async (req, res) => {
+    try {
+        const { userId, amount, reference, accountNumber, totalPayable, fee } = req.body;
+        
+        if (!userId || !amount) {
+            return res.status(400).json({ success: false, message: 'Missing required fields' });
+        }
+        
+        const user = await User.findById(userId);
+        if (!user) {
+            return res.status(404).json({ success: false, message: 'User not found' });
+        }
+        
+        const currentBalance = user.walletBalance;
+        
+        // Check if transaction already exists
+        const existing = await Transaction.findOne({ reference: reference });
+        if (existing) {
+            return res.json({ success: true, alreadyExists: true, transaction: existing });
+        }
+        
+        // Create pending transaction
+        const transaction = new Transaction({
+            userId: user._id,
+            type: 'wallet_funding',
+            amount: amount,
+            previousBalance: currentBalance,
+            newBalance: currentBalance,
+            reference: reference,
+            cashwyreReference: reference,
+            status: 'pending',
+            description: `Pending Cashwyre funding - ₦${amount}`,
+            metadata: {
+                source: 'cashwyre_pending',
+                accountNumber: accountNumber,
+                totalPayable: totalPayable,
+                fee: fee,
+                initiatedAt: new Date()
+            },
+            completedAt: null
+        });
+        
+        await transaction.save();
+        
+        console.log(`📝 Pending transaction created: ${reference}`);
+        
+        res.json({
+            success: true,
+            transaction: transaction,
+            message: 'Pending transaction created successfully'
+        });
+        
+    } catch (error) {
+        console.error('Create pending error:', error.message);
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+
+
+
 
 // ============================================
 // USER RECOVER MISSING BALANCE - SAVES TO MONGODB
