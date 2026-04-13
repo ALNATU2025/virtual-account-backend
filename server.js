@@ -8,8 +8,9 @@ require('dotenv').config();
 
 const app = express();
 
-// Add this after the other constants
+// Add these counters for rate limiting logs
 const forceRefreshCooldown = new Map(); // Track last refresh time per user
+const transactionCheckCount = new Map(); // Track check counts per reference
 const FORCE_REFRESH_DELAY = 5000; // 5 seconds cooldown
 
 // Cashwyre Configuration for NGN
@@ -523,6 +524,7 @@ app.get('/api/wallet/balance/:userId', async (req, res) => {
 
 
 // Check transaction by account number
+// Check transaction by account number
 app.get('/api/transactions/check-by-account', async (req, res) => {
   try {
     const { accountNumber } = req.query;
@@ -531,15 +533,12 @@ app.get('/api/transactions/check-by-account', async (req, res) => {
       return res.json({ success: false, message: 'Account number required' });
     }
     
-    console.log('🔍 Checking transaction by account number:', accountNumber);
-    
-    // Search for virtual account
+    // Silent check - no log
     const virtualAccount = await VirtualAccount.findOne({ 
       accountNumber: accountNumber
     }).sort({ createdAt: -1 });
     
     if (virtualAccount && !virtualAccount.active) {
-      // Find the associated transaction
       const transaction = await Transaction.findOne({ 
         userId: virtualAccount.userId,
         'metadata.accountNumber': accountNumber,
@@ -556,21 +555,6 @@ app.get('/api/transactions/check-by-account', async (req, res) => {
       }
     }
     
-    // Search directly in transactions
-    const transaction = await Transaction.findOne({
-      'metadata.accountNumber': accountNumber,
-      status: 'completed'
-    });
-    
-    if (transaction) {
-      return res.json({
-        success: true,
-        status: 'completed',
-        amount: transaction.amount,
-        reference: transaction.reference
-      });
-    }
-    
     res.json({ success: false, status: 'pending' });
     
   } catch (error) {
@@ -582,7 +566,7 @@ app.get('/api/transactions/check-by-account', async (req, res) => {
 
 
 
-
+// Check transaction status in MongoDB - ADD THIS
 // Check transaction status in MongoDB - ADD THIS
 app.get('/api/transactions/check-status', async (req, res) => {
   try {
@@ -592,7 +576,13 @@ app.get('/api/transactions/check-status', async (req, res) => {
       return res.json({ success: false, message: 'Reference required' });
     }
     
-    console.log('🔍 Checking transaction status for reference:', reference);
+    // Only log every 10th check to reduce noise
+    const checkCount = transactionCheckCount.get(reference) || 0;
+    transactionCheckCount.set(reference, checkCount + 1);
+    
+    if (checkCount % 10 === 0) {
+      console.log('🔍 Checking transaction status for reference:', reference);
+    }
     
     // Search in transactions collection
     const transaction = await Transaction.findOne({ 
@@ -603,7 +593,9 @@ app.get('/api/transactions/check-status', async (req, res) => {
     });
     
     if (transaction) {
-      console.log('✅ Found transaction in MongoDB. Status:', transaction.status);
+      if (checkCount % 10 === 0) {
+        console.log('✅ Found transaction in MongoDB. Status:', transaction.status);
+      }
       return res.json({
         success: true,
         status: transaction.status,
@@ -621,7 +613,9 @@ app.get('/api/transactions/check-status', async (req, res) => {
     });
     
     if (virtualAccount && !virtualAccount.active) {
-      console.log('✅ Found virtual account (processed). Amount:', virtualAccount.amount);
+      if (checkCount % 10 === 0) {
+        console.log('✅ Found virtual account (processed). Amount:', virtualAccount.amount);
+      }
       return res.json({
         success: true,
         status: 'completed',
@@ -629,7 +623,11 @@ app.get('/api/transactions/check-status', async (req, res) => {
       });
     }
     
-    console.log('⏳ Transaction not found in MongoDB yet');
+    // Only log "not found" every 20th check
+    if (checkCount % 20 === 0) {
+      console.log('⏳ Transaction not found in MongoDB yet (check', checkCount + 1, ')');
+    }
+    
     res.json({ success: false, status: 'pending' });
     
   } catch (error) {
@@ -637,6 +635,9 @@ app.get('/api/transactions/check-status', async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 });
+
+// Add this counter at the top with other variables
+const transactionCheckCount = new Map();
 
 
 
@@ -2442,18 +2443,25 @@ app.post('/api/wallet/force-refresh', async (req, res) => {
     const lastRefresh = forceRefreshCooldown.get(userId);
     const now = Date.now();
     if (lastRefresh && (now - lastRefresh) < FORCE_REFRESH_DELAY) {
-      console.log(`⏳ Skipping force refresh for ${userId} - cooldown active (${now - lastRefresh}ms ago)`);
+      // Silent skip - don't log every time
       return res.json({ 
         success: true, 
         message: 'Refresh skipped - cooldown active',
-        cooldown: true
+        cooldown: true,
+        skipLog: true
       });
     }
     
     // Update last refresh time
     forceRefreshCooldown.set(userId, now);
     
-    console.log(`🔄 Force balance refresh requested for user: ${userId}`);
+    // Only log occasionally (every 10th refresh or when not in cooldown)
+    const refreshCount = forceRefreshCooldown.get(`${userId}_count`) || 0;
+    forceRefreshCooldown.set(`${userId}_count`, refreshCount + 1);
+    
+    if (refreshCount % 10 === 0) {
+      console.log(`🔄 Force balance refresh for user: ${userId} (${refreshCount + 1} total)`);
+    }
     
     const user = await User.findById(userId);
     if (!user) {
@@ -2485,7 +2493,6 @@ app.post('/api/wallet/force-refresh', async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 });
-
 
 
 
