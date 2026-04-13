@@ -10,7 +10,6 @@ const app = express();
 
 // Add these counters for rate limiting logs
 const forceRefreshCooldown = new Map(); // Track last refresh time per user
-const transactionCheckCount = new Map(); // Track check counts per reference
 const FORCE_REFRESH_DELAY = 5000; // 5 seconds cooldown
 
 // Cashwyre Configuration for NGN
@@ -635,6 +634,7 @@ app.get('/api/transactions/check-status', async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 });
+
 
 // Add this counter at the top with other variables
 const transactionCheckCount = new Map();
