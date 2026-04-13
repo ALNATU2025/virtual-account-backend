@@ -520,6 +520,69 @@ app.get('/api/wallet/balance/:userId', async (req, res) => {
 
 
 
+
+
+// Check transaction by account number
+app.get('/api/transactions/check-by-account', async (req, res) => {
+  try {
+    const { accountNumber } = req.query;
+    
+    if (!accountNumber) {
+      return res.json({ success: false, message: 'Account number required' });
+    }
+    
+    console.log('🔍 Checking transaction by account number:', accountNumber);
+    
+    // Search for virtual account
+    const virtualAccount = await VirtualAccount.findOne({ 
+      accountNumber: accountNumber
+    }).sort({ createdAt: -1 });
+    
+    if (virtualAccount && !virtualAccount.active) {
+      // Find the associated transaction
+      const transaction = await Transaction.findOne({ 
+        userId: virtualAccount.userId,
+        'metadata.accountNumber': accountNumber,
+        status: 'completed'
+      });
+      
+      if (transaction) {
+        return res.json({
+          success: true,
+          status: 'completed',
+          amount: transaction.amount,
+          reference: transaction.reference
+        });
+      }
+    }
+    
+    // Search directly in transactions
+    const transaction = await Transaction.findOne({
+      'metadata.accountNumber': accountNumber,
+      status: 'completed'
+    });
+    
+    if (transaction) {
+      return res.json({
+        success: true,
+        status: 'completed',
+        amount: transaction.amount,
+        reference: transaction.reference
+      });
+    }
+    
+    res.json({ success: false, status: 'pending' });
+    
+  } catch (error) {
+    console.error('Check by account error:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+
+
+
+
 // Check transaction status in MongoDB - ADD THIS
 app.get('/api/transactions/check-status', async (req, res) => {
   try {
