@@ -516,6 +516,64 @@ app.get('/api/wallet/balance/:userId', async (req, res) => {
 
 
 
+// Check transaction status in MongoDB - ADD THIS
+app.get('/api/transactions/check-status', async (req, res) => {
+  try {
+    const { reference } = req.query;
+    
+    if (!reference) {
+      return res.json({ success: false, message: 'Reference required' });
+    }
+    
+    console.log('🔍 Checking transaction status for reference:', reference);
+    
+    // Search in transactions collection
+    const transaction = await Transaction.findOne({ 
+      $or: [
+        { reference: reference },
+        { cashwyreReference: reference }
+      ]
+    });
+    
+    if (transaction) {
+      console.log('✅ Found transaction in MongoDB. Status:', transaction.status);
+      return res.json({
+        success: true,
+        status: transaction.status,
+        amount: transaction.amount,
+        completedAt: transaction.completedAt
+      });
+    }
+    
+    // Also check virtual accounts
+    const virtualAccount = await VirtualAccount.findOne({
+      $or: [
+        { cashwyreRequestId: reference },
+        { cashwyreReference: reference }
+      ]
+    });
+    
+    if (virtualAccount && !virtualAccount.active) {
+      console.log('✅ Found virtual account (processed). Amount:', virtualAccount.amount);
+      return res.json({
+        success: true,
+        status: 'completed',
+        amount: virtualAccount.amount
+      });
+    }
+    
+    console.log('⏳ Transaction not found in MongoDB yet');
+    res.json({ success: false, status: 'pending' });
+    
+  } catch (error) {
+    console.error('Check status error:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+
+
+
 
 // Add this to your server.js - Get Cashwyre transactions for a user
 app.get('/api/transactions/cashwyre/:userId', async (req, res) => {
