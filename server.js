@@ -8,6 +8,10 @@ require('dotenv').config();
 
 const app = express();
 
+// Add this after the other constants
+const forceRefreshCooldown = new Map(); // Track last refresh time per user
+const FORCE_REFRESH_DELAY = 5000; // 5 seconds cooldown
+
 // Cashwyre Configuration for NGN
 const CASHWYRE_CONFIG = {
   baseURL: 'https://businessapi.cashwyre.com/api/v1.0',
@@ -2362,6 +2366,7 @@ app.get('/api/admin/pending-transactions', async (req, res) => {
 
 
 // ==================== FORCE BALANCE REFRESH FOR FLUTTER APP ====================
+// ==================== FORCE BALANCE REFRESH FOR FLUTTER APP ====================
 app.post('/api/wallet/force-refresh', async (req, res) => {
   try {
     const { userId } = req.body;
@@ -2369,6 +2374,21 @@ app.post('/api/wallet/force-refresh', async (req, res) => {
     if (!userId) {
       return res.status(400).json({ success: false, message: 'User ID required' });
     }
+    
+    // Check cooldown - prevent multiple calls in short time
+    const lastRefresh = forceRefreshCooldown.get(userId);
+    const now = Date.now();
+    if (lastRefresh && (now - lastRefresh) < FORCE_REFRESH_DELAY) {
+      console.log(`⏳ Skipping force refresh for ${userId} - cooldown active (${now - lastRefresh}ms ago)`);
+      return res.json({ 
+        success: true, 
+        message: 'Refresh skipped - cooldown active',
+        cooldown: true
+      });
+    }
+    
+    // Update last refresh time
+    forceRefreshCooldown.set(userId, now);
     
     console.log(`🔄 Force balance refresh requested for user: ${userId}`);
     
@@ -2402,6 +2422,9 @@ app.post('/api/wallet/force-refresh', async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 });
+
+
+
 
 // ==================== GET LATEST TRANSACTIONS ====================
 app.get('/api/transactions/latest/:userId', async (req, res) => {
