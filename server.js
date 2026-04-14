@@ -101,6 +101,7 @@ const UserSchema = new mongoose.Schema({
   updatedAt: { type: Date, default: Date.now }
 });
 
+// Update your TransactionSchema to have a default createdAt
 const TransactionSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   type: { type: String, enum: ['wallet_funding', 'transfer', 'debit', 'credit', 'commission'], required: true },
@@ -113,8 +114,12 @@ const TransactionSchema = new mongoose.Schema({
   metadata: { type: mongoose.Schema.Types.Mixed },
   serviceCharge: { type: Number, default: 0 },
   cashwyreReference: { type: String },
-  completedAt: { type: Date, default: Date.now }
+  completedAt: { type: Date, default: Date.now },
+  createdAt: { type: Date, default: Date.now }  // ← ADD THIS LINE
 });
+
+
+
 
 // Find this schema in your server.js (around line 80-100)
 const VirtualAccountSchema = new mongoose.Schema({
