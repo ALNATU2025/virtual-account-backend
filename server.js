@@ -281,6 +281,7 @@ const createDynamicAccount = async (userId, amount) => {
             cashwyreReference: result.data.reference,
             status: 'pending',
             description: `Wallet funding - ₦${amount}`,
+            createdAt: new Date(), 
             metadata: {
               source: 'cashwyre_payin',
               accountNumber: result.data.accountNumber,
@@ -411,6 +412,7 @@ const updateWalletBalance = async (userId, amount, type, reference, description,
       description,
       metadata,
       serviceCharge,
+       createdAt: new Date(),
       completedAt: new Date()
     });
     
@@ -1275,6 +1277,7 @@ app.post('/api/webhooks/cashwyre-sync', async (req, res) => {
         cashwyreReference: cashwyreCode,
         status: 'completed',
         description: `Virtual Account Funding - ₦${creditAmount} credited to wallet`,
+        createdAt: new Date(),
         metadata: {
           source: 'cashwyre_webhook_sync',
           accountNumber: accountNumber,
@@ -1450,6 +1453,7 @@ app.post('/api/webhooks/cashwyre-process', async (req, res) => {
                 cashwyreReference: cashwyreCode,
                 status: 'completed',
                 description: `Virtual Account Funding - ₦${creditAmount} credited to wallet`,
+                createdAt: new Date(),
                 metadata: {
                     source: 'cashwyre_webhook',
                     accountNumber: accountNumber,
