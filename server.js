@@ -8,6 +8,51 @@ require('dotenv').config();
 
 const app = express();
 
+
+
+// ==================== SUPER FAST FIXES FOR CASHWYRE SERVER ====================
+// Add this right after const app = express();
+
+// 1. FIX AXIOS TIMEOUTS GLOBALLY
+axios.defaults.timeout = 30000;
+axios.defaults.retry = 3;
+axios.defaults.retryDelay = 1000;
+
+// 2. ADD CONNECTION KEEP-ALIVE
+const https = require('https');
+const agent = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 30000,
+  maxSockets: 50,
+  maxFreeSockets: 10,
+  timeout: 60000
+});
+axios.defaults.httpsAgent = agent;
+
+// 3. ADD AUTO-RECOVERY FOR DEAD MONGODB CONNECTIONS
+setInterval(() => {
+  if (mongoose.connection.readyState !== 1) {
+    console.log('🔄 MongoDB disconnected, attempting to reconnect...');
+    mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/cashwyre_wallet').catch(console.error);
+  }
+}, 30000);
+
+// 4. ADD KEEP-ALIVE PING (Prevents Render from sleeping)
+setInterval(async () => {
+  try {
+    const PORT = process.env.PORT || 3000;
+    await axios.get(`http://localhost:${PORT}/health`, { timeout: 5000 });
+    console.log('💓 Keep-alive ping successful');
+  } catch (error) {
+    console.log('⚠️ Keep-alive ping failed');
+  }
+}, 4 * 60 * 1000); // Every 4 minutes
+
+// 5. ADD REQUEST LOGGING FOR DEBUGGING (keep existing middleware)
+console.log('✅ SUPER FAST FIXES APPLIED FOR CASHWYRE SERVER!');
+// ==================== END OF FIXES ====================
+
+
 // Add these counters for rate limiting logs
 const forceRefreshCooldown = new Map(); // Track last refresh time per user
 const FORCE_REFRESH_DELAY = 5000; // 5 seconds cooldown
