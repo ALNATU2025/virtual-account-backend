@@ -479,6 +479,145 @@ app.post('/api/virtual-accounts/create-dynamic', async (req, res) => {
 
 
 
+
+
+// ==================== CASHWYRE FIAT DEPOSIT WEBHOOK ====================
+app.post('/api/webhooks/cashwyre-fiat', async (req, res) => {
+  try {
+    console.log('💰 Cashwyre Fiat Deposit Webhook Received');
+    console.log('Raw body:', req.rawBody?.toString());
+    console.log('Parsed body:', JSON.stringify(req.body, null, 2));
+    
+    let webhookData;
+    if (req.rawBody) {
+      webhookData = JSON.parse(req.rawBody.toString());
+    } else {
+      webhookData = req.body;
+    }
+    
+    const { eventType, eventData } = webhookData;
+    
+    // Handle fiat deposit success
+    if (eventType === 'fiat_deposit.success' || eventType === 'fiat.deposit.success') {
+      console.log('✅ Processing fiat deposit webhook');
+      
+      const {
+        Code,
+        AmountPaid,
+        AmountSettled,
+        Currency,
+        AccountNumber,
+        AccountName,
+        BankName,
+        BankCode,
+        Country,
+        Narration,
+        Status,
+        RequestId,
+        SettledOn,
+        SourceOfPayment,
+        FundingMethod
+      } = eventData;
+      
+      // Check if payment was successful
+      if (Status !== 'success') {
+        console.log(`⚠️ Payment not successful: ${Status}`);
+        return res.status(200).json({ success: false, message: 'Payment not successful' });
+      }
+      
+      // Find the virtual account by account number
+      const virtualAccount = await VirtualAccount.findOne({ 
+        accountNumber: AccountNumber,
+        active: true
+      }).sort({ createdAt: -1 });
+      
+      if (!virtualAccount) {
+        console.log(`❌ Virtual account not found for: ${AccountNumber}`);
+        return res.status(200).json({ success: false, message: 'Virtual account not found' });
+      }
+      
+      console.log(`✅ Found virtual account for user: ${virtualAccount.userId}`);
+      
+      // Use AmountSettled (after fees) or fallback to AmountPaid
+      const amount = parseFloat(AmountSettled || AmountPaid || 0);
+      const reference = `CASHWYRE_${Code || RequestId || Date.now()}`;
+      
+      // Check if already processed
+      const existingTx = await Transaction.findOne({ reference });
+      if (existingTx) {
+        console.log(`⚠️ Transaction already processed: ${reference}`);
+        return res.status(200).json({ success: true, message: 'Already processed' });
+      }
+      
+      // Update wallet balance
+      const result = await updateWalletBalance(
+        virtualAccount.userId,
+        amount,
+        'credit',
+        reference,
+        Narration || `Deposit from ${BankName} - ${AccountNumber}`,
+        {
+          source: 'cashwyre_webhook',
+          paymentMethod: FundingMethod || 'bank_transfer',
+          bankName: BankName,
+          bankCode: BankCode,
+          accountNumber: AccountNumber,
+          accountName: AccountName,
+          currency: Currency || 'NGN',
+          cashwyreCode: Code,
+          cashwyreRequestId: RequestId,
+          settledOn: SettledOn,
+          sourceOfPayment: SourceOfPayment
+        }
+      );
+      
+      // Update virtual account with cashwyre reference
+      virtualAccount.cashwyreReference = Code || RequestId;
+      await virtualAccount.save();
+      
+      console.log(`✅ Successfully processed deposit: ₦${amount} for user ${virtualAccount.userId}`);
+      console.log(`💰 New balance: ₦${result.newBalance}`);
+      
+      // 🔥 CRITICAL: Update the pending transaction status in database
+      await Transaction.findOneAndUpdate(
+        { reference: reference },
+        { 
+          $set: { 
+            status: 'completed',
+            'metadata.webhookProcessed': true,
+            'metadata.webhookData': eventData,
+            'metadata.processedAt': new Date()
+          }
+        }
+      );
+      
+      return res.status(200).json({ 
+        success: true, 
+        message: 'Deposit processed successfully',
+        amount: amount,
+        newBalance: result.newBalance,
+        userId: virtualAccount.userId,
+        reference: reference
+      });
+      
+    } else {
+      console.log(`⚠️ Unhandled event type: ${eventType}`);
+      return res.status(200).json({ success: false, message: 'Unhandled event type' });
+    }
+    
+  } catch (error) {
+    console.error('❌ Cashwyre webhook error:', error.message);
+    // Always return 200 to acknowledge receipt
+    return res.status(200).json({ success: false, message: error.message });
+  }
+});
+
+
+
+
+
+
+
 // Unmatched webhook endpoint
 app.post('/api/webhooks/unmatched', async (req, res) => {
   console.log('📦 Unmatched webhook received:', JSON.stringify(req.body, null, 2));
@@ -1139,6 +1278,57 @@ app.post('/api/payin/check-status', async (req, res) => {
     });
   }
 });
+
+
+
+
+
+
+
+// ==================== CHECK WEBHOOK STATUS ENDPOINT ====================
+app.get('/api/webhooks/check-status/:reference', async (req, res) => {
+  try {
+    const { reference } = req.params;
+    
+    console.log(`🔍 Checking webhook status for reference: ${reference}`);
+    
+    // Find the transaction
+    const transaction = await Transaction.findOne({ reference });
+    
+    if (!transaction) {
+      return res.json({
+        success: false,
+        message: 'Transaction not found',
+        processed: false
+      });
+    }
+    
+    // Check if webhook has been processed
+    const isProcessed = transaction.status === 'completed' || 
+                        transaction.status === 'successful' ||
+                        transaction.metadata?.webhookProcessed === true;
+    
+    return res.json({
+      success: true,
+      processed: isProcessed,
+      status: transaction.status,
+      amount: transaction.amount,
+      newBalance: transaction.balanceAfter,
+      transaction: transaction,
+      message: isProcessed ? 'Payment processed successfully' : 'Payment pending'
+    });
+    
+  } catch (error) {
+    console.error('Error checking webhook status:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to check status',
+      processed: false 
+    });
+  }
+});
+
+
 
 
 
