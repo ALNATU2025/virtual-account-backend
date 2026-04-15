@@ -114,8 +114,16 @@ const TransactionSchema = new mongoose.Schema({
   metadata: { type: mongoose.Schema.Types.Mixed },
   serviceCharge: { type: Number, default: 0 },
   cashwyreReference: { type: String },
-  completedAt: { type: Date, default: Date.now },
-  createdAt: { type: Date, default: Date.now }  // ← ADD THIS LINE
+  completedAt: { type: Date },
+  createdAt: { type: Date, default: Date.now, index: true }  // ← ADD INDEX for sorting
+});
+
+// Add this to automatically set createdAt on save
+TransactionSchema.pre('save', function(next) {
+  if (!this.createdAt) {
+    this.createdAt = new Date();
+  }
+  next();
 });
 
 
@@ -402,19 +410,19 @@ const updateWalletBalance = async (userId, amount, type, reference, description,
     }
     
     const transaction = new Transaction({
-      userId,
-      type: type === 'credit' ? 'wallet_funding' : 'debit',
-      amount,
-      previousBalance,
-      newBalance,
-      reference,
-      status: 'completed',
-      description,
-      metadata,
-      serviceCharge,
-       createdAt: new Date(),
-      completedAt: new Date()
-    });
+  userId,
+  type: type === 'credit' ? 'wallet_funding' : 'debit',
+  amount,
+  previousBalance,
+  newBalance,
+  reference,
+  status: 'completed',
+  description,
+  metadata,
+  serviceCharge,
+  createdAt: new Date(),  // ← USE ACTUAL DATE
+  completedAt: new Date()
+});
     
     await transaction.save({ session });
     
@@ -1644,6 +1652,7 @@ app.post('/api/webhooks/cashwyre-process', async (req, res) => {
                 status: 'completed',
                 description: `Virtual Account Funding - ₦${creditAmount} credited to wallet`,
                 createdAt: new Date(),
+                completedAt: new Date(settledOn || new Date()),
                 metadata: {
                     source: 'cashwyre_webhook',
                     accountNumber: accountNumber,
@@ -1653,7 +1662,6 @@ app.post('/api/webhooks/cashwyre-process', async (req, res) => {
                     isOverpaid: isOverpaid || false,
                     permanentlySaved: true
                 },
-                completedAt: new Date(settledOn || new Date())
             });
             await newTransaction.save();
             console.log('✅ Created new completed transaction');
@@ -2048,6 +2056,77 @@ app.post('/api/payments/process-cashwyre-payment', async (req, res) => {
 });
 
 
+
+
+// ==================== FIX ALL EXISTING TRANSACTION DATES ====================
+app.post('/api/admin/fix-transaction-dates', async (req, res) => {
+  try {
+    console.log('🔧 FIXING ALL TRANSACTION DATES...');
+    
+    // Find all transactions with wrong dates
+    const transactions = await Transaction.find({});
+    let fixedCount = 0;
+    
+    for (const tx of transactions) {
+      // Get the REAL timestamp from ObjectId
+      const realDate = tx._id.getTimestamp();
+      
+      // Only fix if date is wrong (older than 2026-04-14 or all same)
+      if (tx.createdAt && tx.createdAt.toISOString() === '2026-04-14T16:39:56.759Z') {
+        tx.createdAt = realDate;
+        await tx.save();
+        fixedCount++;
+        console.log(`✅ Fixed transaction ${tx._id}: ${realDate.toISOString()}`);
+      }
+    }
+    
+    console.log(`✅ Fixed ${fixedCount} transactions`);
+    
+    res.json({
+      success: true,
+      fixedCount: fixedCount,
+      message: `Fixed ${fixedCount} transaction dates`
+    });
+    
+  } catch (error) {
+    console.error('Fix dates error:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});// ==================== FIX ALL EXISTING TRANSACTION DATES ====================
+app.post('/api/admin/fix-transaction-dates', async (req, res) => {
+  try {
+    console.log('🔧 FIXING ALL TRANSACTION DATES...');
+    
+    // Find all transactions with wrong dates
+    const transactions = await Transaction.find({});
+    let fixedCount = 0;
+    
+    for (const tx of transactions) {
+      // Get the REAL timestamp from ObjectId
+      const realDate = tx._id.getTimestamp();
+      
+      // Only fix if date is wrong (older than 2026-04-14 or all same)
+      if (tx.createdAt && tx.createdAt.toISOString() === '2026-04-14T16:39:56.759Z') {
+        tx.createdAt = realDate;
+        await tx.save();
+        fixedCount++;
+        console.log(`✅ Fixed transaction ${tx._id}: ${realDate.toISOString()}`);
+      }
+    }
+    
+    console.log(`✅ Fixed ${fixedCount} transactions`);
+    
+    res.json({
+      success: true,
+      fixedCount: fixedCount,
+      message: `Fixed ${fixedCount} transaction dates`
+    });
+    
+  } catch (error) {
+    console.error('Fix dates error:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
 
 
 
