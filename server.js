@@ -86,6 +86,52 @@ app.options('*', cors());
 // ==================== JSON PARSER ====================
 
 
+// ==================== AUTHENTICATION MIDDLEWARE ====================
+// Add this RIGHT AFTER your CORS middleware
+
+// Simple token-based authentication
+const authenticateUser = async (req, res, next) => {
+  // Public endpoints - no auth required
+  const publicEndpoints = [
+    '/health',
+    '/api/webhooks/cashwyre',
+    '/api/webhooks/test-forward'
+  ];
+  
+  if (publicEndpoints.some(endpoint => req.path.startsWith(endpoint))) {
+    return next();
+  }
+  
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ success: false, message: 'Authentication required' });
+  }
+  
+  const token = authHeader.substring(7);
+  
+  try {
+    // For Cashwyre server, accept the same JWT from main backend
+    const jwt = require('jsonwebtoken');
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    
+    // Fetch user to verify they exist
+    const user = await User.findById(decoded.id);
+    if (!user) {
+      return res.status(401).json({ success: false, message: 'User not found' });
+    }
+    
+    req.user = { id: user._id.toString(), email: user.email };
+    next();
+  } catch (error) {
+    console.error('Auth error:', error.message);
+    return res.status(401).json({ success: false, message: 'Invalid token' });
+  }
+};
+
+// Apply authentication to all API routes
+app.use('/api', authenticateUser);
+
+
 // ==================== MONGODB MODELS ====================
 const UserSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true },
@@ -465,12 +511,15 @@ const updateWalletBalance = async (userId, amount, type, reference, description,
 app.get('/health', (req, res) => res.json({ status: 'OK', service: 'Cashwyre Wallet' }));
 
 // Create dynamic virtual account
+// Create dynamic virtual account - FIXED
 app.post('/api/virtual-accounts/create-dynamic', async (req, res) => {
   try {
-    const { userId, amount } = req.body;
+    // 🔥 CRITICAL: Use authenticated user ID, not from body
+    const userId = req.user.id;
+    const { amount } = req.body;
     
     if (!userId) {
-      return res.status(400).json({ success: false, message: 'User ID required' });
+      return res.status(401).json({ success: false, message: 'Authentication required' });
     }
     
     if (!amount || amount < 100) {
@@ -706,8 +755,14 @@ app.get('/api/virtual-accounts/:userId', async (req, res) => {
 });
 
 // Get user balance
+// Get user balance - FIXED
 app.get('/api/wallet/balance/:userId', async (req, res) => {
   try {
+    // 🔥 CRITICAL: User can only see their own balance
+    if (req.user.id !== req.params.userId) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    
     const user = await User.findById(req.params.userId);
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
     res.json({ success: true, walletBalance: user.walletBalance, commissionBalance: user.commissionBalance });
@@ -905,8 +960,14 @@ app.get('/api/transactions/all/:userId', async (req, res) => {
 
 
 // Get transactions
+// Get transactions - FIXED
 app.get('/api/transactions/:userId', async (req, res) => {
   try {
+    // 🔥 CRITICAL: User can only see their own transactions
+    if (req.user.id !== req.params.userId) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    
     const { limit = 50, skip = 0 } = req.query;
     const transactions = await Transaction.find({ userId: req.params.userId })
       .sort({ createdAt: -1 })
@@ -919,6 +980,9 @@ app.get('/api/transactions/:userId', async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 });
+
+
+
 
 // Admin dashboard - Get all service charges
 app.get('/api/admin/service-charges', async (req, res) => {
@@ -998,11 +1062,18 @@ app.post('/api/webhooks/partial-payment', async (req, res) => {
 });
 
 // Transfer to user
+// Transfer to user - FIXED
 app.post('/api/transfer', async (req, res) => {
   try {
-    const { senderId, receiverEmail, amount, description, transactionPin } = req.body;
+    // 🔥 CRITICAL: Use authenticated user as sender
+    const senderId = req.user.id;
+    const { receiverEmail, amount, description, transactionPin } = req.body;
     
-    if (!senderId || !receiverEmail || !amount) {
+    if (!senderId) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
+    
+    if (!receiverEmail || !amount) {
       return res.status(400).json({ success: false, message: 'Missing required fields' });
     }
     
@@ -1680,48 +1751,97 @@ app.post('/api/webhooks/cashwyre-process', async (req, res) => {
 
 
 // ==================== WEBHOOK ====================
+// ==================== SINGLE CASHWYRE WEBHOOK ====================
 app.post('/api/webhooks/cashwyre', async (req, res) => {
-  try {
-    console.log('Webhook received:', req.rawBody?.toString() || JSON.stringify(req.body));
-    
-    let webhookData;
-    if (req.rawBody) {
-      webhookData = JSON.parse(req.rawBody.toString());
-    } else {
-      webhookData = req.body;
-    }
-    
-    const { eventType, eventData } = webhookData;
-    
-    if (eventType === 'fiat_deposit.success') {
-      const { AccountNumber, AmountSettled, Code, RequestId, Narration, BankName } = eventData;
+  console.log('💰 Cashwyre Webhook Received');
+  console.log('Time:', new Date().toISOString());
+  
+  // Always respond 200 immediately
+  res.status(200).json({ success: true, message: 'Webhook received' });
+  
+  // Process asynchronously
+  (async () => {
+    try {
+      let webhookData = req.rawBody ? JSON.parse(req.rawBody.toString()) : req.body;
+      const { eventType, eventData } = webhookData;
       
-      const virtualAccount = await VirtualAccount.findOne({ accountNumber: AccountNumber });
-      if (virtualAccount) {
-        const amount = parseFloat(AmountSettled);
-        const reference = `CASHWYRE_${Code || RequestId || Date.now()}`;
-        
-        const existingTx = await Transaction.findOne({ reference });
-        if (!existingTx) {
-          await updateWalletBalance(
-            virtualAccount.userId,
-            amount,
-            'credit',
-            reference,
-            Narration || `Deposit from ${BankName} - ${AccountNumber}`,
-            { source: 'cashwyre_webhook', paymentMethod: 'bank_transfer' }
-          );
-          console.log(`✅ Processed deposit: ₦${amount} for user ${virtualAccount.userId}`);
-        }
+      if (eventType !== 'fiat_deposit.success' && eventType !== 'fiat.deposit.success') {
+        console.log(`⚠️ Unhandled event type: ${eventType}`);
+        return;
       }
+      
+      const {
+        Code, AmountSettled, AccountNumber, Status, RequestId,
+        BankName, SettledOn, SourceOfPayment
+      } = eventData;
+      
+      if (Status !== 'success') {
+        console.log(`⚠️ Payment not successful: ${Status}`);
+        return;
+      }
+      
+      // Generate unique reference
+      const reference = `CASHWYRE_${Code || RequestId || Date.now()}`;
+      
+      // 🔥 Check for duplicate webhook
+      const existingTx = await Transaction.findOne({ reference });
+      if (existingTx) {
+        console.log(`⚠️ Duplicate webhook blocked: ${reference}`);
+        return;
+      }
+      
+      // Find virtual account
+      const virtualAccount = await VirtualAccount.findOne({ 
+        accountNumber: AccountNumber,
+        active: true
+      }).sort({ createdAt: -1 });
+      
+      if (!virtualAccount) {
+        console.log(`❌ Virtual account not found: ${AccountNumber}`);
+        return;
+      }
+      
+      console.log(`✅ Found virtual account for user: ${virtualAccount.userId}`);
+      
+      const amount = parseFloat(AmountSettled || 0);
+      const creditAmount = virtualAccount.amount; // Credit the original amount
+      
+      // Update wallet balance
+      const result = await updateWalletBalance(
+        virtualAccount.userId,
+        creditAmount,
+        'credit',
+        reference,
+        `Deposit from ${BankName} - ${AccountNumber}`,
+        {
+          source: 'cashwyre_webhook',
+          paymentMethod: 'bank_transfer',
+          bankName: BankName,
+          accountNumber: AccountNumber,
+          cashwyreCode: Code,
+          cashwyreRequestId: RequestId,
+          settledOn: SettledOn,
+          sourceOfPayment: SourceOfPayment,
+          amountPaid: amount,
+          amountCredited: creditAmount
+        }
+      );
+      
+      // Deactivate virtual account
+      virtualAccount.active = false;
+      virtualAccount.processedAt = new Date();
+      virtualAccount.cashwyreReference = Code || RequestId;
+      await virtualAccount.save();
+      
+      console.log(`✅ Processed deposit: ₦${creditAmount} for user ${virtualAccount.userId}`);
+      console.log(`💰 New balance: ₦${result.newBalance}`);
+      
+    } catch (error) {
+      console.error('Webhook processing error:', error.message);
     }
-    
-    res.status(200).json({ success: true, message: 'Webhook received' });
-  } catch (error) {
-    console.error('Webhook error:', error.message);
-    res.status(500).json({ success: false, message: error.message });
-  }
+  })();
 });
+
 
 // ==================== CASHWYRE FIAT DEPOSIT WEBHOOK ====================
 app.post('/api/webhooks/cashwyre-fiat', async (req, res) => {
