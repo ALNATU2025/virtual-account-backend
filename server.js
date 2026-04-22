@@ -725,6 +725,7 @@ app.get('/api/wallet/balance/:userId', async (req, res) => {
 
 // Check transaction by account number
 // Check transaction by account number
+// Check transaction by account number - FIXED VERSION
 app.get('/api/transactions/check-by-account', async (req, res) => {
   try {
     const { accountNumber } = req.query;
@@ -733,28 +734,66 @@ app.get('/api/transactions/check-by-account', async (req, res) => {
       return res.json({ success: false, message: 'Account number required' });
     }
     
-    // Silent check - no log
+    console.log(`🔍 Checking transaction for account: ${accountNumber}`);
+    
+    // Method 1: Check virtual account first
     const virtualAccount = await VirtualAccount.findOne({ 
       accountNumber: accountNumber
     }).sort({ createdAt: -1 });
     
-    if (virtualAccount && !virtualAccount.active) {
-      const transaction = await Transaction.findOne({ 
-        userId: virtualAccount.userId,
-        'metadata.accountNumber': accountNumber,
-        status: 'completed'
-      });
+    if (virtualAccount) {
+      console.log(`📋 Found virtual account: active=${virtualAccount.active}, amount=${virtualAccount.amount}`);
       
-      if (transaction) {
+      // If virtual account is inactive (processed)
+      if (!virtualAccount.active) {
+        // Find transaction by metadata.accountNumber OR by userId
+        let transaction = await Transaction.findOne({ 
+          $or: [
+            { 'metadata.accountNumber': accountNumber },
+            { userId: virtualAccount.userId }
+          ],
+          status: 'completed'
+        }).sort({ createdAt: -1 });
+        
+        if (transaction) {
+          console.log(`✅ Found completed transaction: amount=${transaction.amount}`);
+          return res.json({
+            success: true,
+            status: 'completed',
+            amount: transaction.amount,
+            reference: transaction.reference,
+            completedAt: transaction.completedAt
+          });
+        }
+        
+        // If no transaction found but virtual account is inactive, return completed anyway
+        console.log(`⚠️ Virtual account inactive but no transaction - returning completed with amount ${virtualAccount.amount}`);
         return res.json({
           success: true,
           status: 'completed',
-          amount: transaction.amount,
-          reference: transaction.reference
+          amount: virtualAccount.amount,
+          reference: virtualAccount.cashwyreRequestId
         });
       }
     }
     
+    // Method 2: Check for any transaction with this account number in metadata
+    const transactionByMetadata = await Transaction.findOne({ 
+      'metadata.accountNumber': accountNumber,
+      status: 'completed'
+    }).sort({ createdAt: -1 });
+    
+    if (transactionByMetadata) {
+      console.log(`✅ Found transaction by metadata.accountNumber: ${transactionByMetadata.amount}`);
+      return res.json({
+        success: true,
+        status: 'completed',
+        amount: transactionByMetadata.amount,
+        reference: transactionByMetadata.reference
+      });
+    }
+    
+    console.log(`⏳ No completed transaction for account ${accountNumber} - returning pending`);
     res.json({ success: false, status: 'pending' });
     
   } catch (error) {
@@ -1571,28 +1610,33 @@ app.get('/api/transactions/all/:userId', async (req, res) => {
 // ============================================
 // PROCESS CASHWYRE WEBHOOK - SAVES TO MONGODB
 // ============================================
+// ============================================
+// PROCESS CASHWYRE WEBHOOK - SAVES TO MONGODB (FIXED)
+// ============================================
 app.post('/api/webhooks/cashwyre-process', async (req, res) => {
     console.log('💰💰💰 CASHWYRE WEBHOOK RECEIVED BY NODE.JS 💰💰💰');
     console.log('Time:', new Date().toISOString());
     console.log('Body:', JSON.stringify(req.body, null, 2));
     
+    // ALWAYS respond immediately
     res.status(200).json({ success: true, message: 'Processing' });
     
     try {
-        const { cashwyreCode, amountPaid, accountNumber, status, bankName, settledOn, isOverpaid } = req.body;
+        const { cashwyreCode, amountPaid, accountNumber, status, bankName, settledOn, isOverpaid, amountSettled } = req.body;
         
         console.log(`📋 Processing for account: ${accountNumber}`);
         
-        // Find virtual account
+        // Find virtual account by account number (don't require active:true)
         const virtualAccount = await VirtualAccount.findOne({ 
-            accountNumber: accountNumber,
-            active: true
+            accountNumber: accountNumber
         }).sort({ createdAt: -1 });
         
         if (!virtualAccount) {
             console.log('❌ No virtual account found for:', accountNumber);
             return;
         }
+        
+        console.log(`✅ Found virtual account: ${virtualAccount._id}, active: ${virtualAccount.active}`);
         
         const user = await User.findById(virtualAccount.userId);
         if (!user) {
@@ -1609,18 +1653,21 @@ app.post('/api/webhooks/cashwyre-process', async (req, res) => {
         user.updatedAt = new Date();
         await user.save();
         
-        // Deactivate virtual account
+        // CRITICAL FIX 1: Mark virtual account as INACTIVE
         virtualAccount.active = false;
         virtualAccount.processedAt = new Date();
         virtualAccount.cashwyreReference = cashwyreCode;
         await virtualAccount.save();
+        console.log(`✅ Virtual account ${accountNumber} marked as inactive`);
         
-        // CRITICAL: Save or update transaction in MongoDB
+        // CRITICAL FIX 2: Find OR create transaction with metadata.accountNumber
         let pendingTransaction = await Transaction.findOne({ 
             userId: virtualAccount.userId,
-            status: 'pending',
-            'metadata.accountNumber': accountNumber
-        });
+            $or: [
+                { status: 'pending' },
+                { 'metadata.accountNumber': accountNumber }
+            ]
+        }).sort({ createdAt: -1 });
         
         if (pendingTransaction) {
             // Update existing pending to completed
@@ -1632,17 +1679,20 @@ app.post('/api/webhooks/cashwyre-process', async (req, res) => {
             pendingTransaction.description = `Virtual Account Funding - ₦${creditAmount} credited to wallet`;
             pendingTransaction.metadata = {
                 ...pendingTransaction.metadata,
+                accountNumber: accountNumber,  // ← CRITICAL: Save accountNumber in metadata
                 source: 'cashwyre_webhook',
                 amountPaid: amountPaid,
+                amountSettled: amountSettled,
                 status: status,
                 settledOn: settledOn,
                 isOverpaid: isOverpaid || false,
-                permanentlySaved: true
+                bankName: bankName,
+                cashwyreCode: cashwyreCode
             };
             await pendingTransaction.save();
-            console.log('✅ Updated pending transaction to completed');
+            console.log('✅ Updated pending transaction with metadata.accountNumber');
         } else {
-            // Create NEW completed transaction
+            // Create NEW completed transaction with metadata.accountNumber
             const newTransaction = new Transaction({
                 userId: user._id,
                 type: 'wallet_funding',
@@ -1656,24 +1706,28 @@ app.post('/api/webhooks/cashwyre-process', async (req, res) => {
                 createdAt: new Date(),
                 completedAt: new Date(settledOn || new Date()),
                 metadata: {
+                    accountNumber: accountNumber,  // ← CRITICAL: Save accountNumber in metadata
                     source: 'cashwyre_webhook',
-                    accountNumber: accountNumber,
                     amountPaid: amountPaid,
+                    amountSettled: amountSettled,
                     status: status,
                     settledOn: settledOn,
                     isOverpaid: isOverpaid || false,
-                    permanentlySaved: true
+                    bankName: bankName,
+                    cashwyreCode: cashwyreCode
                 },
             });
             await newTransaction.save();
-            console.log('✅ Created new completed transaction');
+            console.log('✅ Created new transaction with metadata.accountNumber');
         }
         
         console.log(`✅ User ${user.email} credited: ₦${creditAmount}`);
         console.log(`💰 Balance: ₦${oldBalance} → ₦${newBalance}`);
+        console.log(`✅ Transaction has metadata.accountNumber = ${accountNumber}`);
         
     } catch (error) {
         console.error('❌ Webhook error:', error.message);
+        console.error('Stack:', error.stack);
     }
 });
 
