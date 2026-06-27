@@ -2875,6 +2875,328 @@ app.post('/api/wallet/force-refresh', async (req, res) => {
 
 
 
+
+
+// ============================================
+// GET PENDING TRANSACTION BY ACCOUNT NUMBER
+// ============================================
+app.get('/api/transactions/pending-by-account/:accountNumber', async (req, res) => {
+    try {
+        const { accountNumber } = req.params;
+        
+        console.log(`🔍 Looking for pending transaction for account: ${accountNumber}`);
+        
+        // Find virtual account first
+        const virtualAccount = await VirtualAccount.findOne({
+            accountNumber: accountNumber,
+            active: true
+        }).sort({ createdAt: -1 });
+        
+        if (!virtualAccount) {
+            console.log('❌ No virtual account found for:', accountNumber);
+            return res.json({ success: false, message: 'No virtual account found' });
+        }
+        
+        // Find pending transaction
+        const transaction = await Transaction.findOne({
+            userId: virtualAccount.userId,
+            status: 'pending',
+            'metadata.accountNumber': accountNumber
+        }).sort({ createdAt: -1 });
+        
+        if (transaction) {
+            console.log('✅ Found pending transaction:', transaction._id);
+            console.log('   Amount:', transaction.amount);
+            console.log('   Fee:', transaction.metadata?.fee || 0);
+            
+            return res.json({
+                success: true,
+                transaction: {
+                    amount: transaction.amount,
+                    fee: transaction.metadata?.fee || 0,
+                    totalPayable: transaction.metadata?.totalPayable || transaction.amount,
+                    reference: transaction.reference,
+                    createdAt: transaction.createdAt
+                }
+            });
+        }
+        
+        // If no pending transaction, return virtual account info
+        console.log('⚠️ No pending transaction found, returning virtual account info');
+        return res.json({
+            success: true,
+            transaction: {
+                amount: virtualAccount.amount,
+                fee: virtualAccount.fee || 0,
+                totalPayable: virtualAccount.totalPayable || virtualAccount.amount,
+                createdAt: virtualAccount.createdAt
+            }
+        });
+        
+    } catch (error) {
+        console.error('Error finding pending transaction:', error.message);
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+// ============================================
+// PROCESS CASHWYRE WEBHOOK - UPDATED V2
+// ============================================
+app.post('/api/webhooks/cashwyre-process', async (req, res) => {
+    console.log('💰💰💰 CASHWYRE WEBHOOK RECEIVED BY NODE.JS V2 💰💰💰');
+    console.log('Time:', new Date().toISOString());
+    console.log('Body:', JSON.stringify(req.body, null, 2));
+    
+    // ALWAYS respond immediately
+    res.status(200).json({ success: true, message: 'Processing' });
+    
+    // Process asynchronously to not block response
+    setImmediate(async () => {
+        try {
+            const { 
+                cashwyreCode, 
+                amountPaid, 
+                accountNumber, 
+                status, 
+                bankName, 
+                settledOn, 
+                isOverpaid, 
+                amountSettled,
+                netAmountToCredit,
+                feeDeducted,
+                originalRequestedAmount,
+                signature,
+                timestamp
+            } = req.body;
+            
+            // Verify signature to prevent tampering
+            const expectedSignature = crypto
+                .createHmac('sha256', process.env.WEBHOOK_SECRET || 'YOUR_SECRET_KEY_HERE')
+                .update(cashwyreCode + netAmountToCredit)
+                .digest('hex');
+            
+            if (signature && signature !== expectedSignature) {
+                console.log('⚠️ Invalid signature, potential tampering detected');
+                return;
+            }
+            
+            // Check if this webhook was already processed
+            const existingTx = await Transaction.findOne({
+                $or: [
+                    { cashwyreReference: cashwyreCode },
+                    { reference: cashwyreCode }
+                ]
+            });
+            
+            if (existingTx && existingTx.status === 'completed') {
+                console.log('⚠️ Transaction already processed:', cashwyreCode);
+                return;
+            }
+            
+            console.log(`📋 Processing for account: ${accountNumber}`);
+            console.log(`💰 Amount Paid: ₦${amountPaid}`);
+            console.log(`💰 Fee Deducted: ₦${feeDeducted}`);
+            console.log(`💰 NET AMOUNT TO CREDIT: ₦${netAmountToCredit}`);
+            
+            // Find virtual account
+            const virtualAccount = await VirtualAccount.findOne({ 
+                accountNumber: accountNumber
+            }).sort({ createdAt: -1 });
+            
+            if (!virtualAccount) {
+                console.log('❌ No virtual account found for:', accountNumber);
+                return;
+            }
+            
+            const user = await User.findById(virtualAccount.userId);
+            if (!user) {
+                console.log('❌ User not found:', virtualAccount.userId);
+                return;
+            }
+            
+            // Determine credit amount
+            let creditAmount = 0;
+            
+            if (netAmountToCredit !== undefined && netAmountToCredit >= 0) {
+                creditAmount = netAmountToCredit;
+                console.log(`💰 Using net amount from PHP: ₦${creditAmount}`);
+            } else {
+                // Fallback calculation
+                let fee = 0;
+                if (amountPaid >= 50000) {
+                    fee = 100;
+                } else {
+                    fee = 50;
+                }
+                
+                if (status === 'PARTIALLY_PAID') {
+                    creditAmount = Math.max(0, amountPaid - fee);
+                } else if (status === 'OVERPAID') {
+                    creditAmount = virtualAccount.amount || Math.max(0, amountPaid - fee);
+                } else {
+                    creditAmount = Math.max(0, amountPaid - fee);
+                }
+                console.log(`💰 Calculated credit amount: ₦${creditAmount}`);
+            }
+            
+            // Don't credit if amount is 0 or negative
+            if (creditAmount <= 0) {
+                console.log(`⚠️ No credit amount (₦${creditAmount}), skipping balance update`);
+                
+                // Still mark virtual account as processed
+                virtualAccount.active = false;
+                virtualAccount.processedAt = new Date();
+                virtualAccount.cashwyreReference = cashwyreCode;
+                await virtualAccount.save();
+                
+                // Create transaction record for zero credit
+                const zeroTransaction = new Transaction({
+                    userId: user._id,
+                    type: 'wallet_funding',
+                    amount: 0,
+                    previousBalance: user.walletBalance,
+                    newBalance: user.walletBalance,
+                    reference: cashwyreCode,
+                    cashwyreReference: cashwyreCode,
+                    status: 'completed',
+                    description: `Payment received but fee exceeded amount - No credit given (Paid: ₦${amountPaid}, Fee: ₦${feeDeducted})`,
+                    metadata: {
+                        accountNumber: accountNumber,
+                        source: 'cashwyre_webhook',
+                        amountPaid: amountPaid,
+                        feeDeducted: feeDeducted,
+                        netAmountToCredit: 0,
+                        status: status,
+                        isOverpaid: isOverpaid || false,
+                        bankName: bankName,
+                        cashwyreCode: cashwyreCode,
+                        noCreditGiven: true
+                    },
+                    completedAt: new Date(settledOn || new Date())
+                });
+                await zeroTransaction.save();
+                
+                console.log(`✅ Virtual account marked as processed, no credit given`);
+                return;
+            }
+            
+            // Update user balance with atomic operation
+            const oldBalance = user.walletBalance;
+            const newBalance = oldBalance + creditAmount;
+            
+            // Use findOneAndUpdate for atomic operation
+            const updatedUser = await User.findOneAndUpdate(
+                { _id: user._id, walletBalance: oldBalance },
+                { 
+                    $set: { 
+                        walletBalance: newBalance,
+                        updatedAt: new Date()
+                    }
+                },
+                { new: true, runValidators: true }
+            );
+            
+            if (!updatedUser) {
+                console.log('❌ Balance update failed - race condition detected');
+                return;
+            }
+            
+            console.log(`✅ User balance updated: ₦${oldBalance} → ₦${newBalance}`);
+            
+            // Mark virtual account as processed
+            virtualAccount.active = false;
+            virtualAccount.processedAt = new Date();
+            virtualAccount.cashwyreReference = cashwyreCode;
+            await virtualAccount.save();
+            console.log(`✅ Virtual account ${accountNumber} marked as inactive`);
+            
+            // Find or create transaction
+            let pendingTransaction = await Transaction.findOne({ 
+                userId: virtualAccount.userId,
+                $or: [
+                    { status: 'pending' },
+                    { 'metadata.accountNumber': accountNumber },
+                    { cashwyreReference: cashwyreCode }
+                ]
+            }).sort({ createdAt: -1 });
+            
+            if (pendingTransaction && pendingTransaction.status === 'pending') {
+                // Update existing pending to completed
+                pendingTransaction.status = 'completed';
+                pendingTransaction.amount = creditAmount;
+                pendingTransaction.newBalance = newBalance;
+                pendingTransaction.previousBalance = oldBalance;
+                pendingTransaction.cashwyreReference = cashwyreCode;
+                pendingTransaction.completedAt = new Date(settledOn || new Date());
+                pendingTransaction.description = `Wallet Funding - ₦${creditAmount} credited (Fee: ₦${feeDeducted || (amountPaid - creditAmount)} removed)`;
+                pendingTransaction.metadata = {
+                    ...pendingTransaction.metadata,
+                    accountNumber: accountNumber,
+                    source: 'cashwyre_webhook',
+                    amountPaid: amountPaid,
+                    amountSettled: amountSettled,
+                    feeDeducted: feeDeducted || (amountPaid - creditAmount),
+                    netAmountToCredit: creditAmount,
+                    originalRequestedAmount: originalRequestedAmount || virtualAccount.amount,
+                    status: status,
+                    settledOn: settledOn,
+                    isOverpaid: isOverpaid || false,
+                    bankName: bankName,
+                    cashwyreCode: cashwyreCode,
+                    processedAt: new Date()
+                };
+                await pendingTransaction.save();
+                console.log('✅ Updated pending transaction to completed');
+            } else {
+                // Create new transaction
+                const newTransaction = new Transaction({
+                    userId: user._id,
+                    type: 'wallet_funding',
+                    amount: creditAmount,
+                    previousBalance: oldBalance,
+                    newBalance: newBalance,
+                    reference: cashwyreCode,
+                    cashwyreReference: cashwyreCode,
+                    status: 'completed',
+                    description: `Wallet Funding - ₦${creditAmount} credited (Fee: ₦${feeDeducted || (amountPaid - creditAmount)} removed)`,
+                    createdAt: new Date(),
+                    completedAt: new Date(settledOn || new Date()),
+                    metadata: {
+                        accountNumber: accountNumber,
+                        source: 'cashwyre_webhook',
+                        amountPaid: amountPaid,
+                        amountSettled: amountSettled,
+                        feeDeducted: feeDeducted || (amountPaid - creditAmount),
+                        netAmountToCredit: creditAmount,
+                        originalRequestedAmount: originalRequestedAmount || virtualAccount.amount,
+                        status: status,
+                        settledOn: settledOn,
+                        isOverpaid: isOverpaid || false,
+                        bankName: bankName,
+                        cashwyreCode: cashwyreCode,
+                        processedAt: new Date()
+                    },
+                });
+                await newTransaction.save();
+                console.log('✅ Created new transaction');
+            }
+            
+            // Log success
+            console.log(`✅✅✅ SUCCESS: User ${user.email} credited ₦${creditAmount}`);
+            console.log(`   💰 Balance: ₦${oldBalance} → ₦${newBalance}`);
+            console.log(`   💰 Fee Removed: ₦${feeDeducted || (amountPaid - creditAmount)}`);
+            
+        } catch (error) {
+            console.error('❌ Webhook error:', error.message);
+            console.error('Stack:', error.stack);
+        }
+    });
+});
+
+
+
+
+
 // ==================== GET LATEST TRANSACTIONS ====================
 app.get('/api/transactions/latest/:userId', async (req, res) => {
   try {
