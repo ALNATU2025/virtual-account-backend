@@ -1613,6 +1613,9 @@ app.get('/api/transactions/all/:userId', async (req, res) => {
 // ============================================
 // PROCESS CASHWYRE WEBHOOK - SAVES TO MONGODB (FIXED)
 // ============================================
+// ============================================
+// PROCESS CASHWYRE WEBHOOK - FIXED VERSION
+// ============================================
 app.post('/api/webhooks/cashwyre-process', async (req, res) => {
     console.log('💰💰💰 CASHWYRE WEBHOOK RECEIVED BY NODE.JS 💰💰💰');
     console.log('Time:', new Date().toISOString());
@@ -1622,11 +1625,27 @@ app.post('/api/webhooks/cashwyre-process', async (req, res) => {
     res.status(200).json({ success: true, message: 'Processing' });
     
     try {
-        const { cashwyreCode, amountPaid, accountNumber, status, bankName, settledOn, isOverpaid, amountSettled } = req.body;
+        const { 
+            cashwyreCode, 
+            amountPaid, 
+            accountNumber, 
+            status, 
+            bankName, 
+            settledOn, 
+            isOverpaid, 
+            amountSettled,
+            netAmountToCredit,  // ← THIS IS THE KEY - USE THIS VALUE
+            feeDeducted,
+            originalRequestedAmount,
+            isPartial
+        } = req.body;
         
         console.log(`📋 Processing for account: ${accountNumber}`);
+        console.log(`💰 Amount Paid: ₦${amountPaid}`);
+        console.log(`💰 Fee Deducted: ₦${feeDeducted}`);
+        console.log(`💰 NET AMOUNT TO CREDIT: ₦${netAmountToCredit}`);
         
-        // Find virtual account by account number (don't require active:true)
+        // Find virtual account by account number
         const virtualAccount = await VirtualAccount.findOne({ 
             accountNumber: accountNumber
         }).sort({ createdAt: -1 });
@@ -1644,93 +1663,202 @@ app.post('/api/webhooks/cashwyre-process', async (req, res) => {
             return;
         }
         
-        const creditAmount = virtualAccount.amount;
+        // ============================================
+        // 🔥 CRITICAL FIX: USE netAmountToCredit FROM PHP
+        // ============================================
+        // PHP already calculated: amountPaid - fee = netAmountToCredit
+        // For PARTIALLY_PAID: ₦100 - ₦50 = ₦50
+        // USE THIS VALUE, NOT virtualAccount.amount!
+        // ============================================
+        
+        let creditAmount = 0;
+        
+        // 1. Check if PHP sent netAmountToCredit
+        if (netAmountToCredit !== undefined && netAmountToCredit !== null) {
+            creditAmount = parseFloat(netAmountToCredit);
+            console.log(`💰 USING netAmountToCredit FROM PHP: ₦${creditAmount}`);
+        } else {
+            // 2. Fallback: calculate based on status
+            let fee = feeDeducted || 0;
+            if (fee === 0) {
+                fee = (amountPaid >= 50000) ? 100 : 50;
+            }
+            
+            if (status === 'PARTIALLY_PAID') {
+                creditAmount = Math.max(0, amountPaid - fee);
+                console.log(`💰 Calculated for PARTIALLY_PAID: ₦${amountPaid} - ₦${fee} = ₦${creditAmount}`);
+            } else if (status === 'OVERPAID') {
+                creditAmount = virtualAccount.amount || Math.max(0, amountPaid - fee);
+                console.log(`💰 Calculated for OVERPAID: ₦${creditAmount}`);
+            } else {
+                creditAmount = Math.max(0, amountPaid - fee);
+                console.log(`💰 Calculated normal: ₦${creditAmount}`);
+            }
+        }
+        
+        // 3. Ensure we don't credit more than the virtual account amount
+        if (creditAmount > virtualAccount.amount) {
+            console.log(`⚠️ Credit amount (₦${creditAmount}) exceeds virtual account amount (₦${virtualAccount.amount}), capping`);
+            creditAmount = virtualAccount.amount;
+        }
+        
+        // 4. If credit amount is 0 or negative, don't credit anything
+        if (creditAmount <= 0) {
+            console.log(`⚠️ No credit amount (₦${creditAmount}), skipping balance update`);
+            
+            // Still mark virtual account as processed
+            virtualAccount.active = false;
+            virtualAccount.processedAt = new Date();
+            virtualAccount.cashwyreReference = cashwyreCode;
+            await virtualAccount.save();
+            
+            // Create zero transaction record
+            const zeroTransaction = new Transaction({
+                userId: user._id,
+                type: 'wallet_funding',
+                amount: 0,
+                previousBalance: user.walletBalance,
+                newBalance: user.walletBalance,
+                reference: cashwyreCode,
+                cashwyreReference: cashwyreCode,
+                status: 'completed',
+                description: `Payment received but fee exceeded amount - No credit (Paid: ₦${amountPaid}, Fee: ₦${feeDeducted})`,
+                metadata: {
+                    accountNumber: accountNumber,
+                    source: 'cashwyre_webhook',
+                    amountPaid: amountPaid,
+                    feeDeducted: feeDeducted,
+                    netAmountToCredit: 0,
+                    status: status,
+                    isOverpaid: isOverpaid || false,
+                    bankName: bankName,
+                    cashwyreCode: cashwyreCode,
+                    noCreditGiven: true
+                },
+                completedAt: new Date(settledOn || new Date())
+            });
+            await zeroTransaction.save();
+            
+            console.log(`✅ Virtual account marked as processed, no credit given`);
+            return;
+        }
+        
+        // 5. UPDATE USER BALANCE WITH creditAmount (NOT virtualAccount.amount)
         const oldBalance = user.walletBalance;
         const newBalance = oldBalance + creditAmount;
         
-        // Update user balance
-        user.walletBalance = newBalance;
-        user.updatedAt = new Date();
-        await user.save();
+        console.log(`💰 OLD BALANCE: ₦${oldBalance}`);
+        console.log(`💰 CREDITING: ₦${creditAmount}`);
+        console.log(`💰 NEW BALANCE: ₦${newBalance}`);
         
-        // CRITICAL FIX 1: Mark virtual account as INACTIVE
+        // Use findOneAndUpdate for atomic operation
+        const updatedUser = await User.findOneAndUpdate(
+            { _id: user._id, walletBalance: oldBalance },
+            { 
+                $set: { 
+                    walletBalance: newBalance,
+                    updatedAt: new Date()
+                }
+            },
+            { new: true, runValidators: true }
+        );
+        
+        if (!updatedUser) {
+            console.log('❌ Balance update failed - race condition detected');
+            return;
+        }
+        
+        console.log(`✅ User balance updated: ₦${oldBalance} → ₦${newBalance}`);
+        
+        // 6. Mark virtual account as processed
         virtualAccount.active = false;
         virtualAccount.processedAt = new Date();
         virtualAccount.cashwyreReference = cashwyreCode;
         await virtualAccount.save();
         console.log(`✅ Virtual account ${accountNumber} marked as inactive`);
         
-        // CRITICAL FIX 2: Find OR create transaction with metadata.accountNumber
+        // 7. Find or create transaction
         let pendingTransaction = await Transaction.findOne({ 
             userId: virtualAccount.userId,
             $or: [
                 { status: 'pending' },
-                { 'metadata.accountNumber': accountNumber }
+                { 'metadata.accountNumber': accountNumber },
+                { cashwyreReference: cashwyreCode }
             ]
         }).sort({ createdAt: -1 });
         
-        if (pendingTransaction) {
+        if (pendingTransaction && pendingTransaction.status === 'pending') {
             // Update existing pending to completed
             pendingTransaction.status = 'completed';
+            pendingTransaction.amount = creditAmount;  // ← USE creditAmount
             pendingTransaction.newBalance = newBalance;
             pendingTransaction.previousBalance = oldBalance;
             pendingTransaction.cashwyreReference = cashwyreCode;
             pendingTransaction.completedAt = new Date(settledOn || new Date());
-            pendingTransaction.description = `Virtual Account Funding - ₦${creditAmount} credited to wallet`;
+            pendingTransaction.description = `Wallet Funding - ₦${creditAmount} credited (Fee: ₦${feeDeducted} removed)`;
             pendingTransaction.metadata = {
                 ...pendingTransaction.metadata,
-                accountNumber: accountNumber,  // ← CRITICAL: Save accountNumber in metadata
+                accountNumber: accountNumber,
                 source: 'cashwyre_webhook',
                 amountPaid: amountPaid,
                 amountSettled: amountSettled,
+                feeDeducted: feeDeducted || (amountPaid - creditAmount),
+                netAmountToCredit: creditAmount,
+                originalRequestedAmount: originalRequestedAmount || virtualAccount.amount,
                 status: status,
                 settledOn: settledOn,
                 isOverpaid: isOverpaid || false,
                 bankName: bankName,
-                cashwyreCode: cashwyreCode
+                cashwyreCode: cashwyreCode,
+                isPartial: isPartial || false,
+                processedAt: new Date()
             };
             await pendingTransaction.save();
-            console.log('✅ Updated pending transaction with metadata.accountNumber');
+            console.log('✅ Updated pending transaction to completed');
         } else {
-            // Create NEW completed transaction with metadata.accountNumber
+            // Create new transaction
             const newTransaction = new Transaction({
                 userId: user._id,
                 type: 'wallet_funding',
-                amount: creditAmount,
+                amount: creditAmount,  // ← USE creditAmount
                 previousBalance: oldBalance,
                 newBalance: newBalance,
                 reference: cashwyreCode,
                 cashwyreReference: cashwyreCode,
                 status: 'completed',
-                description: `Virtual Account Funding - ₦${creditAmount} credited to wallet`,
+                description: `Wallet Funding - ₦${creditAmount} credited (Fee: ₦${feeDeducted} removed)`,
                 createdAt: new Date(),
                 completedAt: new Date(settledOn || new Date()),
                 metadata: {
-                    accountNumber: accountNumber,  // ← CRITICAL: Save accountNumber in metadata
+                    accountNumber: accountNumber,
                     source: 'cashwyre_webhook',
                     amountPaid: amountPaid,
                     amountSettled: amountSettled,
+                    feeDeducted: feeDeducted || (amountPaid - creditAmount),
+                    netAmountToCredit: creditAmount,
+                    originalRequestedAmount: originalRequestedAmount || virtualAccount.amount,
                     status: status,
                     settledOn: settledOn,
                     isOverpaid: isOverpaid || false,
                     bankName: bankName,
-                    cashwyreCode: cashwyreCode
+                    cashwyreCode: cashwyreCode,
+                    isPartial: isPartial || false,
+                    processedAt: new Date()
                 },
             });
             await newTransaction.save();
-            console.log('✅ Created new transaction with metadata.accountNumber');
+            console.log('✅ Created new transaction');
         }
         
-        console.log(`✅ User ${user.email} credited: ₦${creditAmount}`);
-        console.log(`💰 Balance: ₦${oldBalance} → ₦${newBalance}`);
-        console.log(`✅ Transaction has metadata.accountNumber = ${accountNumber}`);
+        console.log(`✅✅✅ SUCCESS: User ${user.email} credited ₦${creditAmount}`);
+        console.log(`   💰 Balance: ₦${oldBalance} → ₦${newBalance}`);
+        console.log(`   💰 Fee Removed: ₦${feeDeducted || (amountPaid - creditAmount)}`);
         
     } catch (error) {
         console.error('❌ Webhook error:', error.message);
         console.error('Stack:', error.stack);
     }
 });
-
 
 
 
