@@ -46,7 +46,67 @@ const userSchema = mongoose.Schema(
       default: true,
     },
     
-    // === NEW FIELDS TO ADD ===
+    // === KYC / CASHWYRE DEDICATED ACCOUNT FIELDS ===
+    
+    // KYC Information
+    bvn: {
+      type: String,
+      default: null,
+      trim: true,
+    },
+    nin: {
+      type: String,
+      default: null,
+      trim: true,
+    },
+    kycVerified: {
+      type: Boolean,
+      default: false,
+    },
+    kycSubmittedAt: {
+      type: Date,
+      default: null,
+    },
+    kycApprovedAt: {
+      type: Date,
+      default: null,
+    },
+    
+    // Cashwyre Reserve Account Reference
+    accountReference: {
+      type: String,
+      default: null,
+      unique: true,
+      sparse: true,
+      trim: true,
+    },
+    
+    // Additional KYC Details (optional fields)
+    dateOfBirth: {
+      type: Date,
+      default: null,
+    },
+    gender: {
+      type: String,
+      enum: ['Male', 'Female', 'Other', null],
+      default: null,
+    },
+    address: {
+      type: String,
+      default: null,
+    },
+    city: {
+      type: String,
+      default: null,
+    },
+    state: {
+      type: String,
+      default: null,
+    },
+    country: {
+      type: String,
+      default: 'Nigeria',
+    },
     
     // Referral system fields
     referralCode: {
@@ -69,7 +129,7 @@ const userSchema = mongoose.Schema(
       default: 0.0,
     },
     
-       // Authentication fields
+    // Authentication fields
     refreshToken: {
       type: String,
       default: null,
@@ -82,7 +142,6 @@ const userSchema = mongoose.Schema(
       type: Date,
       default: null,
     },
-    // OTP fields for password reset
     resetPasswordOTP: {
       type: String,
       default: null,
@@ -134,8 +193,7 @@ const userSchema = mongoose.Schema(
       default: false,
     },
     
-  
-    // Virtual Account fields
+    // Virtual Account fields (for Cashwyre Reserve Account)
     virtualAccount: {
       assigned: { 
         type: Boolean, 
@@ -161,13 +219,29 @@ const userSchema = mongoose.Schema(
         sparse: true,
         default: null
       },
+      bankCode: {
+        type: String,
+        default: null,
+      },
+      currency: {
+        type: String,
+        default: 'NGN',
+      },
+      status: {
+        type: String,
+        enum: ['ACTIVE', 'INACTIVE', 'PENDING', null],
+        default: null,
+      },
+      createdOn: {
+        type: Date,
+        default: null,
+      },
     },
   },
   {
     timestamps: true,
   }
 );
-
 
 // Hash transaction PIN before saving if modified
 userSchema.pre('save', async function (next) {
@@ -229,6 +303,82 @@ userSchema.statics.findByReferralCode = function (referralCode) {
   return this.findOne({ referralCode: referralCode.toUpperCase() });
 };
 
+// ============================================================
+// KYC / DEDICATED ACCOUNT METHODS
+// ============================================================
+
+// Check if user has completed KYC
+userSchema.methods.hasCompletedKYC = function () {
+  return this.kycVerified === true && 
+         this.bvn !== null && 
+         this.bvn !== '' &&
+         this.nin !== null && 
+         this.nin !== '';
+};
+
+// Check if user has a dedicated account
+userSchema.methods.hasDedicatedAccount = function () {
+  return this.virtualAccount.assigned === true && 
+         this.virtualAccount.accountNumber !== null &&
+         this.virtualAccount.accountNumber !== '';
+};
+
+// Get dedicated account details
+userSchema.methods.getDedicatedAccount = function () {
+  if (!this.hasDedicatedAccount()) {
+    return null;
+  }
+  return {
+    accountNumber: this.virtualAccount.accountNumber,
+    accountName: this.virtualAccount.accountName || this.fullName,
+    bankName: this.virtualAccount.bankName || 'Moniepoint Microfinance Bank',
+    bankCode: this.virtualAccount.bankCode || '50515',
+    currency: this.virtualAccount.currency || 'NGN',
+    status: this.virtualAccount.status || 'ACTIVE',
+    assigned: this.virtualAccount.assigned,
+    reference: this.virtualAccount.reference,
+    createdOn: this.virtualAccount.createdOn,
+  };
+};
+
+// Assign a dedicated account to user
+userSchema.methods.assignDedicatedAccount = function (accountData) {
+  this.virtualAccount.assigned = true;
+  this.virtualAccount.accountNumber = accountData.accountNumber;
+  this.virtualAccount.accountName = accountData.accountName || this.fullName;
+  this.virtualAccount.bankName = accountData.bankName || 'Moniepoint Microfinance Bank';
+  this.virtualAccount.bankCode = accountData.bankCode || '50515';
+  this.virtualAccount.currency = accountData.currency || 'NGN';
+  this.virtualAccount.status = accountData.status || 'ACTIVE';
+  this.virtualAccount.reference = accountData.accountReference || this.accountReference;
+  this.virtualAccount.createdOn = accountData.createdOn || new Date();
+  this.accountReference = accountData.accountReference || this.accountReference;
+  
+  return this.save();
+};
+
+// Update KYC information
+userSchema.methods.updateKYC = function (kycData) {
+  if (kycData.bvn) this.bvn = kycData.bvn;
+  if (kycData.nin) this.nin = kycData.nin;
+  if (kycData.dateOfBirth) this.dateOfBirth = kycData.dateOfBirth;
+  if (kycData.gender) this.gender = kycData.gender;
+  if (kycData.address) this.address = kycData.address;
+  if (kycData.city) this.city = kycData.city;
+  if (kycData.state) this.state = kycData.state;
+  if (kycData.country) this.country = kycData.country;
+  
+  this.kycVerified = true;
+  this.kycSubmittedAt = new Date();
+  this.kycApprovedAt = new Date();
+  
+  return this.save();
+};
+
+// ============================================================
+// VIRTUAL FIELDS
+// ============================================================
+
 // Virtual for formatted wallet balance
 userSchema.virtual('formattedWalletBalance').get(function () {
   return `₦${this.walletBalance.toFixed(2)}`;
@@ -239,11 +389,35 @@ userSchema.virtual('formattedCommissionBalance').get(function () {
   return `₦${this.commissionBalance.toFixed(2)}`;
 });
 
-// Index for better performance
+// Virtual for KYC status
+userSchema.virtual('kycStatus').get(function () {
+  if (this.kycVerified) return 'VERIFIED';
+  if (this.bvn || this.nin) return 'PENDING';
+  return 'NOT_STARTED';
+});
+
+// Virtual for account status
+userSchema.virtual('accountStatus').get(function () {
+  if (this.virtualAccount.assigned && this.virtualAccount.status === 'ACTIVE') {
+    return 'ACTIVE';
+  }
+  if (this.virtualAccount.assigned) {
+    return 'INACTIVE';
+  }
+  return 'NOT_ASSIGNED';
+});
+
+// ============================================================
+// INDEXES
+// ============================================================
+
 userSchema.index({ email: 1 });
 userSchema.index({ phone: 1 });
 userSchema.index({ referralCode: 1 });
 userSchema.index({ referrerId: 1 });
 userSchema.index({ 'virtualAccount.accountNumber': 1 });
+userSchema.index({ accountReference: 1 });
+userSchema.index({ bvn: 1 });
+userSchema.index({ nin: 1 });
 
 module.exports = mongoose.models.User || mongoose.model('User', userSchema);
