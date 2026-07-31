@@ -491,6 +491,379 @@ app.post('/api/virtual-accounts/create-dynamic', async (req, res) => {
 
 
 
+
+// server.js - ADD THESE ROUTES
+
+// ============================================================
+// CASHWYRE RESERVE ACCOUNT (DEDICATED ACCOUNT) ENDPOINTS
+// ============================================================
+
+// Create Reserve Account
+app.post('/api/cashwyre/reserve-account', async (req, res) => {
+  try {
+    const {
+      userId,
+      firstName,
+      lastName,
+      email,
+      phoneNumber,
+      bvn,
+      nin,
+      accountReference,
+      currency = 'NGN',
+      country = 'NG'
+    } = req.body;
+
+    // Validate required fields
+    if (!userId || !firstName || !lastName || !phoneNumber || !bvn || !nin || !accountReference) {
+      return res.status(400).json({
+        success: false,
+        message: 'Missing required fields. Please provide all required information.'
+      });
+    }
+
+    // Check if user exists
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Check if account already exists for this user
+    const existingAccount = await VirtualAccount.findOne({
+      userId: userId,
+      accountReference: accountReference,
+      active: true
+    });
+
+    if (existingAccount) {
+      return res.json({
+        success: true,
+        message: 'Account already exists',
+        hasAccount: true,
+        account: {
+          accountNumber: existingAccount.accountNumber,
+          accountName: existingAccount.accountName,
+          bankName: existingAccount.bankName,
+          bankCode: existingAccount.bankCode,
+          status: existingAccount.status || 'ACTIVE',
+          accountReference: existingAccount.accountReference
+        }
+      });
+    }
+
+    // Call Cashwyre API to create reserve account
+    console.log('🏦 Creating Cashwyre Reserve Account for user:', userId);
+    console.log('📋 Account Reference:', accountReference);
+
+    const requestId = `${Date.now()}${Math.random().toString(36).substring(2, 10)}`;
+
+    const cashwyrePayload = {
+      appId: CASHWYRE_CONFIG.businessCode,
+      requestId: requestId,
+      country: country,
+      currency: currency,
+      firstName: firstName.substring(0, 50),
+      lastName: lastName.substring(0, 50),
+      email: email || '',
+      phoneNumber: phoneNumber,
+      accountReference: accountReference,
+      bvn: bvn,
+      nin: nin,
+      businessCode: CASHWYRE_CONFIG.businessCode
+    };
+
+    console.log('📤 Cashwyre Request:', JSON.stringify(cashwyrePayload, null, 2));
+
+    const cashwyreResponse = await axios.post(
+      `${CASHWYRE_CONFIG.baseURL}/ReserveAccount/createReserveAccount`,
+      cashwyrePayload,
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${CASHWYRE_CONFIG.secretKey}`,
+          'Accept': 'application/json'
+        },
+        timeout: 30000
+      }
+    );
+
+    console.log('📥 Cashwyre Response:', JSON.stringify(cashwyreResponse.data, null, 2));
+
+    if (cashwyreResponse.data.success === true) {
+      const accountData = cashwyreResponse.data.data;
+
+      // Save to MongoDB
+      const newAccount = new VirtualAccount({
+        userId: userId,
+        accountNumber: accountData.accountNumber,
+        accountName: accountData.accountName,
+        bankName: accountData.bankName || 'Moniepoint Microfinance Bank',
+        bankCode: accountData.bankCode || '50515',
+        currency: accountData.currency || 'NGN',
+        accountReference: accountReference,
+        active: true,
+        status: accountData.status || 'ACTIVE',
+        cashwyreRequestId: requestId,
+        expiresOn: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000), // 1 year
+        expiresOnInMins: 525600,
+        createdAt: new Date()
+      });
+
+      await newAccount.save();
+
+      // Update user with KYC info
+      user.bvn = bvn;
+      user.nin = nin;
+      user.kycVerified = true;
+      user.accountReference = accountReference;
+      await user.save();
+
+      console.log('✅ Reserve account created and saved to MongoDB');
+
+      return res.json({
+        success: true,
+        message: 'Reserve account created successfully',
+        account: {
+          accountNumber: accountData.accountNumber,
+          accountName: accountData.accountName,
+          bankName: accountData.bankName || 'Moniepoint Microfinance Bank',
+          bankCode: accountData.bankCode || '50515',
+          currency: accountData.currency || 'NGN',
+          status: accountData.status || 'ACTIVE',
+          accountReference: accountReference,
+          createdOn: accountData.createdOn
+        }
+      });
+    } else {
+      throw new Error(cashwyreResponse.data.message || 'Failed to create reserve account');
+    }
+
+  } catch (error) {
+    console.error('❌ Create Reserve Account Error:', error.message);
+    if (error.response) {
+      console.error('Response Data:', JSON.stringify(error.response.data, null, 2));
+    }
+    res.status(500).json({
+      success: false,
+      message: error.response?.data?.message || error.message || 'Failed to create reserve account'
+    });
+  }
+});
+
+// Get Reserve Account by User ID or Account Reference
+app.get('/api/cashwyre/reserve-account', async (req, res) => {
+  try {
+    const { userId, accountReference } = req.query;
+
+    if (!userId && !accountReference) {
+      return res.status(400).json({
+        success: false,
+        message: 'Either userId or accountReference is required'
+      });
+    }
+
+    let query = {};
+    if (userId) {
+      query.userId = userId;
+    }
+    if (accountReference) {
+      query.accountReference = accountReference;
+    }
+
+    // First check local database
+    const localAccount = await VirtualAccount.findOne({
+      ...query,
+      active: true
+    }).sort({ createdAt: -1 });
+
+    if (localAccount) {
+      return res.json({
+        success: true,
+        hasAccount: true,
+        account: {
+          accountNumber: localAccount.accountNumber,
+          accountName: localAccount.accountName,
+          bankName: localAccount.bankName,
+          bankCode: localAccount.bankCode,
+          status: localAccount.status || 'ACTIVE',
+          accountReference: localAccount.accountReference,
+          createdOn: localAccount.createdOn
+        }
+      });
+    }
+
+    // If not found locally, check Cashwyre
+    if (accountReference) {
+      const requestId = `${Date.now()}${Math.random().toString(36).substring(2, 10)}`;
+
+      const cashwyreResponse = await axios.post(
+        `${CASHWYRE_CONFIG.baseURL}/ReserveAccount/getReserveAccount`,
+        {
+          appId: CASHWYRE_CONFIG.businessCode,
+          requestId: requestId,
+          AccountReference: accountReference
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${CASHWYRE_CONFIG.secretKey}`,
+            'Accept': 'application/json'
+          },
+          timeout: 15000
+        }
+      );
+
+      if (cashwyreResponse.data.success === true) {
+        const accountData = cashwyreResponse.data.data;
+
+        // Save to MongoDB for future
+        const newAccount = new VirtualAccount({
+          userId: userId || 'unknown',
+          accountNumber: accountData.accountNumber,
+          accountName: accountData.accountName,
+          bankName: accountData.bankName || 'Moniepoint Microfinance Bank',
+          bankCode: accountData.bankCode || '50515',
+          currency: accountData.currency || 'NGN',
+          accountReference: accountReference,
+          active: accountData.status === 'ACTIVE',
+          status: accountData.status || 'ACTIVE',
+          cashwyreRequestId: requestId,
+          expiresOn: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
+          expiresOnInMins: 525600,
+          createdAt: new Date()
+        });
+
+        await newAccount.save();
+
+        return res.json({
+          success: true,
+          hasAccount: true,
+          account: {
+            accountNumber: accountData.accountNumber,
+            accountName: accountData.accountName,
+            bankName: accountData.bankName || 'Moniepoint Microfinance Bank',
+            bankCode: accountData.bankCode || '50515',
+            status: accountData.status || 'ACTIVE',
+            accountReference: accountReference,
+            createdOn: accountData.createdOn
+          }
+        });
+      }
+    }
+
+    return res.json({
+      success: false,
+      hasAccount: false,
+      message: 'No dedicated account found'
+    });
+
+  } catch (error) {
+    console.error('❌ Get Reserve Account Error:', error.message);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to get reserve account'
+    });
+  }
+});
+
+// Search Reserve Accounts
+app.post('/api/cashwyre/search-reserve-accounts', async (req, res) => {
+  try {
+    const {
+      userId,
+      accountNumber,
+      accountReference,
+      fromDate,
+      toDate,
+      limit = 50,
+      skip = 0
+    } = req.body;
+
+    let query = {};
+    if (userId) query.userId = userId;
+    if (accountNumber) query.accountNumber = accountNumber;
+    if (accountReference) query.accountReference = accountReference;
+    if (fromDate || toDate) {
+      query.createdAt = {};
+      if (fromDate) query.createdAt.$gte = new Date(fromDate);
+      if (toDate) query.createdAt.$lte = new Date(toDate);
+    }
+
+    const accounts = await VirtualAccount.find(query)
+      .sort({ createdAt: -1 })
+      .limit(parseInt(limit))
+      .skip(parseInt(skip));
+
+    const total = await VirtualAccount.countDocuments(query);
+
+    res.json({
+      success: true,
+      accounts: accounts,
+      total: total,
+      pagination: {
+        limit: parseInt(limit),
+        skip: parseInt(skip)
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Search Reserve Accounts Error:', error.message);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to search reserve accounts'
+    });
+  }
+});
+
+// Get User KYC Status
+app.get('/api/users/kyc-status', async (req, res) => {
+  try {
+    const { userId } = req.query;
+
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        message: 'userId is required'
+      });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Check if user has a reserve account
+    const hasAccount = await VirtualAccount.findOne({
+      userId: userId,
+      active: true
+    });
+
+    res.json({
+      success: true,
+      hasBvn: !!user.bvn,
+      hasNin: !!user.nin,
+      kycVerified: user.kycVerified || false,
+      hasDedicatedAccount: !!hasAccount,
+      accountReference: user.accountReference || null
+    });
+
+  } catch (error) {
+    console.error('❌ Get KYC Status Error:', error.message);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to get KYC status'
+    });
+  }
+});
+
+
+
 // ==================== CASHWYRE FIAT DEPOSIT WEBHOOK ====================
 app.post('/api/webhooks/cashwyre-fiat', async (req, res) => {
   try {
