@@ -556,10 +556,10 @@ app.post('/api/cashwyre/reserve-account', async (req, res) => {
     } = req.body;
 
     // Validate required fields
-    if (!userId || !firstName || !lastName || !phoneNumber || !bvn || !nin || !accountReference) {
+    if (!userId || !firstName || !lastName || !phoneNumber || !nin || !accountReference) {
       return res.status(400).json({
         success: false,
-        message: 'Missing required fields. Please provide all required information.'
+        message: 'Missing required fields. Please provide: firstName, lastName, phoneNumber, nin, accountReference'
       });
     }
 
