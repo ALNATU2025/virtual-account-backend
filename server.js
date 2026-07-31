@@ -89,6 +89,7 @@ app.options('*', cors());
 
 
 // ==================== MONGODB MODELS ====================
+
 const UserSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true },
   fullName: { type: String, required: true },
@@ -99,9 +100,44 @@ const UserSchema = new mongoose.Schema({
   transactionPinSet: { type: Boolean, default: false },
   isActive: { type: Boolean, default: true },
   role: { type: String, default: 'user' },
+  
+  // ============================================================
+  // KYC FIELDS FOR CASHWYRE RESERVE ACCOUNT
+  // ============================================================
+  bvn: { type: String, default: null },
+  nin: { type: String, default: null },
+  kycVerified: { type: Boolean, default: false },
+  kycSubmittedAt: { type: Date, default: null },
+  kycApprovedAt: { type: Date, default: null },
+  accountReference: { type: String, default: null, unique: true, sparse: true },
+  dateOfBirth: { type: Date, default: null },
+  gender: { type: String, enum: ['Male', 'Female', 'Other', null], default: null },
+  address: { type: String, default: null },
+  city: { type: String, default: null },
+  state: { type: String, default: null },
+  country: { type: String, default: 'Nigeria' },
+  
+  // Virtual Account fields for Cashwyre Reserve Account
+  virtualAccount: {
+    assigned: { type: Boolean, default: false },
+    accountNumber: { type: String, default: null },
+    accountName: { type: String, default: null },
+    bankName: { type: String, default: null },
+    bankCode: { type: String, default: null },
+    currency: { type: String, default: 'NGN' },
+    status: { type: String, default: null },
+    reference: { type: String, default: null },
+    createdOn: { type: Date, default: null }
+  },
+  
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
 });
+
+// Add indexes for KYC fields
+UserSchema.index({ bvn: 1 });
+UserSchema.index({ nin: 1 });
+UserSchema.index({ accountReference: 1 }, { unique: true, sparse: true });
 
 // Update your TransactionSchema to have a default createdAt
 const TransactionSchema = new mongoose.Schema({
@@ -144,16 +180,21 @@ const VirtualAccountSchema = new mongoose.Schema({
   fee: { type: Number, required: true },
   cashwyreRequestId: { type: String, required: true, unique: true },
   cashwyreReference: { type: String },
-  expiresOn: { type: Date, required: true },  // Keep required true, but we now provide it
+  expiresOn: { type: Date, required: true },
   expiresOnInMins: { type: Number, required: true },
   active: { type: Boolean, default: true },
   processedAt: { type: Date },
-  createdAt: { type: Date, default: Date.now }
+  createdAt: { type: Date, default: Date.now },
+  
+  // ADD THESE TWO FIELDS
+  accountReference: { type: String, default: null },
+  status: { type: String, default: 'ACTIVE' }
 });
 
 // Indexes
 VirtualAccountSchema.index({ userId: 1, createdAt: -1 });
 VirtualAccountSchema.index({ accountNumber: 1 }, { unique: true });
+VirtualAccountSchema.index({ accountReference: 1 });
 
 const User = mongoose.model('User', UserSchema);
 const Transaction = mongoose.model('Transaction', TransactionSchema);
