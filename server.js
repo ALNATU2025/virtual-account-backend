@@ -534,13 +534,20 @@ app.post('/api/virtual-accounts/create-dynamic', async (req, res) => {
 
 
 // server.js - ADD THESE ROUTES
-
 // ============================================================
-// CASHWYRE RESERVE ACCOUNT (DEDICATED ACCOUNT) ENDPOINTS
+// CASHWYRE RESERVE ACCOUNT (DEDICATED ACCOUNT) - ENHANCED DEBUG
 // ============================================================
 
-// Create Reserve Account
 app.post('/api/cashwyre/reserve-account', async (req, res) => {
+  console.log('\n' + '='.repeat(80));
+  console.log('🏦🏦🏦 KYC RESERVE ACCOUNT REQUEST RECEIVED 🏦🏦🏦');
+  console.log('Time:', new Date().toISOString());
+  console.log('='.repeat(80));
+  
+  // 🔥 LOG 1: RAW REQUEST BODY
+  console.log('\n📥 RAW REQUEST BODY:');
+  console.log(JSON.stringify(req.body, null, 2));
+  
   try {
     const {
       userId,
@@ -552,27 +559,65 @@ app.post('/api/cashwyre/reserve-account', async (req, res) => {
       nin,
       accountReference,
       currency = 'NGN',
-      country = 'NG'
+      country = 'NG',
+      // Additional KYC fields from frontend
+      address,
+      dateOfBirth,
+      gender
     } = req.body;
 
-    // Validate required fields
-    if (!userId || !firstName || !lastName || !phoneNumber || !nin || !accountReference) {
+    console.log('\n📋 PARSED REQUEST DATA:');
+    console.log(`   userId: ${userId}`);
+    console.log(`   firstName: ${firstName}`);
+    console.log(`   lastName: ${lastName}`);
+    console.log(`   email: ${email}`);
+    console.log(`   phoneNumber: ${phoneNumber}`);
+    console.log(`   bvn: ${bvn ? bvn.substring(0, 4) + '****' : 'NOT PROVIDED'}`);
+    console.log(`   nin: ${nin ? nin.substring(0, 4) + '****' : 'NOT PROVIDED'}`);
+    console.log(`   accountReference: ${accountReference}`);
+    console.log(`   address: ${address || 'NOT PROVIDED'}`);
+    console.log(`   dateOfBirth: ${dateOfBirth || 'NOT PROVIDED'}`);
+    console.log(`   gender: ${gender || 'NOT PROVIDED'}`);
+    console.log(`   currency: ${currency}`);
+    console.log(`   country: ${country}`);
+
+    // 🔥 LOG 2: VALIDATION CHECK
+    console.log('\n🔍 VALIDATION CHECK:');
+    const missingFields = [];
+    if (!userId) missingFields.push('userId');
+    if (!firstName) missingFields.push('firstName');
+    if (!lastName) missingFields.push('lastName');
+    if (!phoneNumber) missingFields.push('phoneNumber');
+    if (!nin && !bvn) missingFields.push('nin or bvn (at least one required)');
+    if (!accountReference) missingFields.push('accountReference');
+
+    if (missingFields.length > 0) {
+      console.log('❌ MISSING REQUIRED FIELDS:', missingFields.join(', '));
       return res.status(400).json({
         success: false,
-        message: 'Missing required fields. Please provide: firstName, lastName, phoneNumber, nin, accountReference'
+        message: `Missing required fields: ${missingFields.join(', ')}`,
+        missingFields: missingFields
       });
     }
+    console.log('✅ All required fields present');
 
-    // Check if user exists
+    // 🔥 LOG 3: CHECK IF USER EXISTS
+    console.log('\n👤 CHECKING USER IN DATABASE...');
     const user = await User.findById(userId);
     if (!user) {
+      console.log('❌ USER NOT FOUND:', userId);
       return res.status(404).json({
         success: false,
-        message: 'User not found'
+        message: 'User not found',
+        userId: userId
       });
     }
+    console.log(`✅ USER FOUND: ${user.fullName} (${user.email})`);
+    console.log(`   Current wallet balance: ₦${user.walletBalance}`);
+    console.log(`   KYC Verified: ${user.kycVerified}`);
 
-    // Check if account already exists for this user
+    // 🔥 LOG 4: CHECK EXISTING ACCOUNT
+    console.log('\n🔍 CHECKING FOR EXISTING RESERVE ACCOUNT...');
     const existingAccount = await VirtualAccount.findOne({
       userId: userId,
       accountReference: accountReference,
@@ -580,6 +625,12 @@ app.post('/api/cashwyre/reserve-account', async (req, res) => {
     });
 
     if (existingAccount) {
+      console.log('✅ EXISTING ACCOUNT FOUND:');
+      console.log(`   Account Number: ${existingAccount.accountNumber}`);
+      console.log(`   Account Name: ${existingAccount.accountName}`);
+      console.log(`   Bank: ${existingAccount.bankName}`);
+      console.log(`   Status: ${existingAccount.status}`);
+      
       return res.json({
         success: true,
         message: 'Account already exists',
@@ -594,12 +645,12 @@ app.post('/api/cashwyre/reserve-account', async (req, res) => {
         }
       });
     }
+    console.log('ℹ️ No existing account found - proceeding to create new one');
 
-    // Call Cashwyre API to create reserve account
-    console.log('🏦 Creating Cashwyre Reserve Account for user:', userId);
-    console.log('📋 Account Reference:', accountReference);
-
+    // 🔥 LOG 5: PREPARE CASHWYRE PAYLOAD
+    console.log('\n📤 PREPARING CASHWYRE PAYLOAD:');
     const requestId = `${Date.now()}${Math.random().toString(36).substring(2, 10)}`;
+    console.log(`   Generated Request ID: ${requestId}`);
 
     const cashwyrePayload = {
       appId: CASHWYRE_CONFIG.businessCode,
@@ -611,12 +662,20 @@ app.post('/api/cashwyre/reserve-account', async (req, res) => {
       email: email || '',
       phoneNumber: phoneNumber,
       accountReference: accountReference,
-      bvn: bvn,
-      nin: nin,
+      bvn: bvn || '',
+      nin: nin || '',
       businessCode: CASHWYRE_CONFIG.businessCode
     };
 
-    console.log('📤 Cashwyre Request:', JSON.stringify(cashwyrePayload, null, 2));
+    console.log('\n📤 CASHWYRE REQUEST PAYLOAD:');
+    console.log(JSON.stringify(cashwyrePayload, null, 2));
+    console.log(`\n🔑 Using Secret Key: ${CASHWYRE_CONFIG.secretKey.substring(0, 10)}...`);
+    console.log(`🏢 Business Code: ${CASHWYRE_CONFIG.businessCode}`);
+    console.log(`🌐 URL: ${CASHWYRE_CONFIG.baseURL}/ReserveAccount/createReserveAccount`);
+
+    // 🔥 LOG 6: CALL CASHWYRE API
+    console.log('\n⏳ CALLING CASHWYRE API...');
+    const startTime = Date.now();
 
     const cashwyreResponse = await axios.post(
       `${CASHWYRE_CONFIG.baseURL}/ReserveAccount/createReserveAccount`,
@@ -631,12 +690,32 @@ app.post('/api/cashwyre/reserve-account', async (req, res) => {
       }
     );
 
-    console.log('📥 Cashwyre Response:', JSON.stringify(cashwyreResponse.data, null, 2));
+    const responseTime = Date.now() - startTime;
+    console.log(`\n⏱️ Cashwyre API Response Time: ${responseTime}ms`);
 
+    // 🔥 LOG 7: CASHWYRE RESPONSE
+    console.log('\n📥 CASHWYRE RESPONSE:');
+    console.log(`   Status: ${cashwyreResponse.status}`);
+    console.log(`   Success: ${cashwyreResponse.data.success}`);
+    console.log('   Full Response:');
+    console.log(JSON.stringify(cashwyreResponse.data, null, 2));
+
+    // 🔥 LOG 8: PROCESS RESPONSE
     if (cashwyreResponse.data.success === true) {
       const accountData = cashwyreResponse.data.data;
+      
+      console.log('\n✅ CASHWYRE ACCOUNT CREATED SUCCESSFULLY:');
+      console.log(`   Account Number: ${accountData.accountNumber}`);
+      console.log(`   Account Name: ${accountData.accountName}`);
+      console.log(`   Bank Name: ${accountData.bankName || 'Moniepoint Microfinance Bank'}`);
+      console.log(`   Bank Code: ${accountData.bankCode || '50515'}`);
+      console.log(`   Currency: ${accountData.currency || 'NGN'}`);
+      console.log(`   Status: ${accountData.status || 'ACTIVE'}`);
+      console.log(`   Created On: ${accountData.createdOn}`);
 
-      // Save to MongoDB
+      // 🔥 LOG 9: SAVE TO MONGODB
+      console.log('\n💾 SAVING TO MONGODB...');
+      
       const newAccount = new VirtualAccount({
         userId: userId,
         accountNumber: accountData.accountNumber,
@@ -648,23 +727,43 @@ app.post('/api/cashwyre/reserve-account', async (req, res) => {
         active: true,
         status: accountData.status || 'ACTIVE',
         cashwyreRequestId: requestId,
-        expiresOn: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000), // 1 year
+        expiresOn: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
         expiresOnInMins: 525600,
-        createdAt: new Date()
+        createdAt: new Date(),
+        // Store KYC data
+        metadata: {
+          address: address,
+          dateOfBirth: dateOfBirth,
+          gender: gender,
+          bvn: bvn,
+          nin: nin,
+          kycSubmittedAt: new Date()
+        }
       });
 
       await newAccount.save();
+      console.log(`✅ VirtualAccount saved with ID: ${newAccount._id}`);
 
-      // Update user with KYC info
-      user.bvn = bvn;
-      user.nin = nin;
+      // 🔥 LOG 10: UPDATE USER
+      console.log('\n👤 UPDATING USER RECORD...');
+      user.bvn = bvn || user.bvn;
+      user.nin = nin || user.nin;
       user.kycVerified = true;
       user.accountReference = accountReference;
+      user.kycSubmittedAt = new Date();
+      user.kycApprovedAt = new Date();
+      user.address = address || user.address;
+      if (dateOfBirth) user.dateOfBirth = new Date(dateOfBirth);
+      if (gender) user.gender = gender;
+      
       await user.save();
+      console.log(`✅ User updated: ${user.fullName}`);
+      console.log(`   KYC Verified: ${user.kycVerified}`);
+      console.log(`   Account Reference: ${user.accountReference}`);
 
-      console.log('✅ Reserve account created and saved to MongoDB');
-
-      return res.json({
+      // 🔥 LOG 11: FINAL RESPONSE
+      console.log('\n📤 FINAL RESPONSE TO CLIENT:');
+      const finalResponse = {
         success: true,
         message: 'Reserve account created successfully',
         account: {
@@ -676,23 +775,57 @@ app.post('/api/cashwyre/reserve-account', async (req, res) => {
           status: accountData.status || 'ACTIVE',
           accountReference: accountReference,
           createdOn: accountData.createdOn
+        },
+        kycStatus: {
+          verified: true,
+          bvnProvided: !!bvn,
+          ninProvided: !!nin
         }
-      });
+      };
+      
+      console.log(JSON.stringify(finalResponse, null, 2));
+      console.log('\n' + '='.repeat(80));
+      console.log('✅✅✅ KYC RESERVE ACCOUNT CREATED SUCCESSFULLY ✅✅✅');
+      console.log('='.repeat(80) + '\n');
+
+      return res.json(finalResponse);
+      
     } else {
+      // Cashwyre returned success: false
+      console.log('\n❌ CASHWYRE API RETURNED FAILURE:');
+      console.log(`   Message: ${cashwyreResponse.data.message || 'Unknown error'}`);
+      console.log(`   Full Response: ${JSON.stringify(cashwyreResponse.data, null, 2)}`);
+      
       throw new Error(cashwyreResponse.data.message || 'Failed to create reserve account');
     }
 
   } catch (error) {
-    console.error('❌ Create Reserve Account Error:', error.message);
+    console.log('\n❌❌❌ ERROR IN RESERVE ACCOUNT CREATION ❌❌❌');
+    console.log(`   Error: ${error.message}`);
+    console.log(`   Stack: ${error.stack}`);
+    
     if (error.response) {
-      console.error('Response Data:', JSON.stringify(error.response.data, null, 2));
+      console.log('\n📥 ERROR RESPONSE FROM CASHWYRE:');
+      console.log(`   Status: ${error.response.status}`);
+      console.log(`   Data: ${JSON.stringify(error.response.data, null, 2)}`);
     }
+    
+    console.log('\n' + '='.repeat(80));
+    console.log('❌ RESERVE ACCOUNT CREATION FAILED ❌');
+    console.log('='.repeat(80) + '\n');
+    
     res.status(500).json({
       success: false,
-      message: error.response?.data?.message || error.message || 'Failed to create reserve account'
+      message: error.response?.data?.message || error.message || 'Failed to create reserve account',
+      error: error.response?.data || error.message,
+      timestamp: new Date().toISOString()
     });
   }
 });
+
+
+
+
 
 // Get Reserve Account by User ID or Account Reference
 app.get('/api/cashwyre/reserve-account', async (req, res) => {
