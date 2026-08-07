@@ -223,16 +223,31 @@ const generateRequestId = () => {
 };
 
 const calculateServiceCharge = (amount) => {
-  // YOUR APP'S SERVICE CHARGE (not including payment provider fees)
-  // - ₦100 for amounts ₦50,000 and above
-  // - ₦50 for amounts below ₦50,000
-  if (amount >= 50000) {
-    return 100;
-  } else {
-    return 50;
+  // 1.5% service charge on all deposits
+  // Minimum charge: ₦1.50 (for small amounts)
+  // Maximum charge: ₦7,500 (for ₦500,000 deposits)
+  
+  const percentage = 1.5 / 100; // 1.5%
+  let fee = amount * percentage;
+  
+  // Round to 2 decimal places (kobo)
+  fee = Math.round(fee * 100) / 100;
+  
+  // Minimum fee of ₦1.50 for very small amounts
+  if (fee < 1.50 && amount > 0) {
+    fee = 1.50;
   }
+  
+  // Maximum fee cap (optional, for large amounts)
+  const MAX_FEE = 7500; // 1.5% of ₦500,000
+  if (fee > MAX_FEE) {
+    fee = MAX_FEE;
+  }
+  
+  console.log(`💰 Fee calculation: ₦${amount} × 1.5% = ₦${fee}`);
+  
+  return fee;
 };
-
 
 // Cashwyre API Call
 const cashwyreApiCall = async (endpoint, data) => {
@@ -257,12 +272,20 @@ const createDynamicAccount = async (userId, amount) => {
   const requestId = generateRequestId();
   
   // FRONTEND DISPLAY FEE (what user sees)
-  let frontendDisplayFee = 0;
-  if (amount >= 50000) {
-    frontendDisplayFee = 100;  // User sees ₦100 for amounts ₦50,000+
-  } else {
-    frontendDisplayFee = 50;   // User sees ₦50 for amounts below ₦50,000
+  // In createDynamicAccount function, replace the frontendDisplayFee calculation:
+
+// FRONTEND DISPLAY FEE (what user sees) - 1.5% of amount
+let frontendDisplayFee = 0;
+if (amount > 0) {
+  frontendDisplayFee = amount * 0.015; // 1.5%
+  frontendDisplayFee = Math.round(frontendDisplayFee * 100) / 100;
+  if (frontendDisplayFee < 1.50) {
+    frontendDisplayFee = 1.50;
   }
+  if (frontendDisplayFee > 7500) {
+    frontendDisplayFee = 7500;
+  }
+}
   
   // Calculate what user should pay TOTAL (what they see in frontend)
   const userSeesTotalPayable = amount + frontendDisplayFee;
@@ -2021,6 +2044,125 @@ app.get('/api/webhooks/test', (req, res) => {
 });
 
 
+
+// ============================================
+// MANUAL BALANCE RECOVERY FOR USERS
+// ============================================
+app.post('/api/payments/manual-recovery', async (req, res) => {
+    try {
+        const { accountNumber, amount, cashwyreCode } = req.body;
+        
+        console.log('🔄 Manual recovery requested:');
+        console.log(`   Account: ${accountNumber}`);
+        console.log(`   Amount: ₦${amount}`);
+        console.log(`   Code: ${cashwyreCode}`);
+        
+        if (!accountNumber || !amount) {
+            return res.status(400).json({
+                success: false,
+                message: 'Account number and amount required'
+            });
+        }
+        
+        // Find the virtual account
+        const virtualAccount = await VirtualAccount.findOne({
+            accountNumber: accountNumber
+        }).sort({ createdAt: -1 });
+        
+        if (!virtualAccount) {
+            return res.status(404).json({
+                success: false,
+                message: 'Virtual account not found'
+            });
+        }
+        
+        const user = await User.findById(virtualAccount.userId);
+        if (!user) {
+            return res.status(404).json({
+                success: false,
+                message: 'User not found'
+            });
+        }
+        
+        // Check if already processed
+        const existingTx = await Transaction.findOne({
+            $or: [
+                { cashwyreReference: cashwyreCode },
+                { reference: cashwyreCode }
+            ]
+        });
+        
+        if (existingTx && existingTx.status === 'completed') {
+            return res.json({
+                success: true,
+                alreadyProcessed: true,
+                newBalance: user.walletBalance,
+                message: 'Transaction already processed'
+            });
+        }
+        
+        const creditAmount = parseFloat(amount);
+        const oldBalance = user.walletBalance;
+        const newBalance = oldBalance + creditAmount;
+        
+        // Update user balance
+        user.walletBalance = newBalance;
+        user.updatedAt = new Date();
+        await user.save();
+        
+        // Mark virtual account as processed
+        virtualAccount.active = false;
+        virtualAccount.processedAt = new Date();
+        virtualAccount.cashwyreReference = cashwyreCode || `MANUAL_${Date.now()}`;
+        await virtualAccount.save();
+        
+        // Create transaction
+        const transaction = new Transaction({
+            userId: user._id,
+            type: 'wallet_funding',
+            amount: creditAmount,
+            previousBalance: oldBalance,
+            newBalance: newBalance,
+            reference: cashwyreCode || `MANUAL_${Date.now()}`,
+            cashwyreReference: cashwyreCode,
+            status: 'completed',
+            description: `Manual Recovery - ₦${creditAmount} credited (Fee: ₦${(amountPaid || 0) - creditAmount} removed)`,
+            metadata: {
+                accountNumber: accountNumber,
+                source: 'manual_recovery',
+                amountPaid: amount,
+                netAmountToCredit: creditAmount,
+                recoveredAt: new Date()
+            },
+            completedAt: new Date()
+        });
+        
+        await transaction.save();
+        
+        console.log(`✅ MANUAL RECOVERY SUCCESSFUL:`);
+        console.log(`   User: ${user.email}`);
+        console.log(`   Balance: ₦${oldBalance} → ₦${newBalance}`);
+        console.log(`   Credited: ₦${creditAmount}`);
+        
+        res.json({
+            success: true,
+            newBalance: newBalance,
+            oldBalance: oldBalance,
+            creditedAmount: creditAmount,
+            transactionId: transaction._id,
+            message: `Successfully credited ₦${creditAmount} to your wallet!`
+        });
+        
+    } catch (error) {
+        console.error('Manual recovery error:', error.message);
+        res.status(500).json({
+            success: false,
+            message: error.message || 'Failed to recover balance'
+        });
+    }
+});
+
+
 // ==================== SYNC ENDPOINT FOR PHP WEBHOOK ====================
 app.post('/api/webhooks/cashwyre-sync', async (req, res) => {
   // ADD THESE LOGS INSIDE THE ROUTE HANDLER
@@ -2247,6 +2389,9 @@ app.get('/api/transactions/all/:userId', async (req, res) => {
 // ============================================
 // PROCESS CASHWYRE WEBHOOK - FIXED VERSION
 // ============================================
+// ============================================
+// PROCESS CASHWYRE WEBHOOK - FIXED VERSION
+// ============================================
 app.post('/api/webhooks/cashwyre-process', async (req, res) => {
     console.log('💰💰💰 CASHWYRE WEBHOOK RECEIVED BY NODE.JS 💰💰💰');
     console.log('Time:', new Date().toISOString());
@@ -2265,7 +2410,7 @@ app.post('/api/webhooks/cashwyre-process', async (req, res) => {
             settledOn, 
             isOverpaid, 
             amountSettled,
-            netAmountToCredit,  // ← THIS IS THE KEY - USE THIS VALUE
+            netAmountToCredit,
             feeDeducted,
             originalRequestedAmount,
             isPartial
@@ -2287,6 +2432,8 @@ app.post('/api/webhooks/cashwyre-process', async (req, res) => {
         }
         
         console.log(`✅ Found virtual account: ${virtualAccount._id}, active: ${virtualAccount.active}`);
+        console.log(`   Virtual Account Amount: ₦${virtualAccount.amount}`);
+        console.log(`   Account Type: ${virtualAccount.metadata?.accountType || 'unknown'}`);
         
         const user = await User.findById(virtualAccount.userId);
         if (!user) {
@@ -2295,11 +2442,8 @@ app.post('/api/webhooks/cashwyre-process', async (req, res) => {
         }
         
         // ============================================
-        // 🔥 CRITICAL FIX: USE netAmountToCredit FROM PHP
-        // ============================================
-        // PHP already calculated: amountPaid - fee = netAmountToCredit
-        // For PARTIALLY_PAID: ₦100 - ₦50 = ₦50
-        // USE THIS VALUE, NOT virtualAccount.amount!
+        // 🔥 CRITICAL FIX: ALWAYS credit netAmountToCredit
+        // DO NOT cap based on virtualAccount.amount for reserve accounts
         // ============================================
         
         let creditAmount = 0;
@@ -2319,7 +2463,7 @@ app.post('/api/webhooks/cashwyre-process', async (req, res) => {
                 creditAmount = Math.max(0, amountPaid - fee);
                 console.log(`💰 Calculated for PARTIALLY_PAID: ₦${amountPaid} - ₦${fee} = ₦${creditAmount}`);
             } else if (status === 'OVERPAID') {
-                creditAmount = virtualAccount.amount || Math.max(0, amountPaid - fee);
+                creditAmount = Math.max(0, amountPaid - fee);
                 console.log(`💰 Calculated for OVERPAID: ₦${creditAmount}`);
             } else {
                 creditAmount = Math.max(0, amountPaid - fee);
@@ -2327,11 +2471,16 @@ app.post('/api/webhooks/cashwyre-process', async (req, res) => {
             }
         }
         
-        // 3. Ensure we don't credit more than the virtual account amount
-        if (creditAmount > virtualAccount.amount) {
-            console.log(`⚠️ Credit amount (₦${creditAmount}) exceeds virtual account amount (₦${virtualAccount.amount}), capping`);
-            creditAmount = virtualAccount.amount;
-        }
+        // 🔥 REMOVE THIS CAPPING LOGIC - IT BREAKS RESERVE ACCOUNTS
+        // The virtualAccount.amount is 0 for reserve accounts, but we should still credit
+        // if (creditAmount > virtualAccount.amount) {
+        //     console.log(`⚠️ Credit amount (₦${creditAmount}) exceeds virtual account amount (₦${virtualAccount.amount}), capping`);
+        //     creditAmount = virtualAccount.amount;
+        // }
+        
+        // 🔥 NEW LOGIC: Always credit the net amount, even if virtualAccount.amount is 0
+        // For reserve accounts, virtualAccount.amount is 0 (they are for receiving payments)
+        // The credit amount comes from the webhook, not from the virtual account
         
         // 4. If credit amount is 0 or negative, don't credit anything
         if (creditAmount <= 0) {
@@ -2374,7 +2523,7 @@ app.post('/api/webhooks/cashwyre-process', async (req, res) => {
             return;
         }
         
-        // 5. UPDATE USER BALANCE WITH creditAmount (NOT virtualAccount.amount)
+        // 5. UPDATE USER BALANCE WITH creditAmount
         const oldBalance = user.walletBalance;
         const newBalance = oldBalance + creditAmount;
         
@@ -2421,12 +2570,12 @@ app.post('/api/webhooks/cashwyre-process', async (req, res) => {
         if (pendingTransaction && pendingTransaction.status === 'pending') {
             // Update existing pending to completed
             pendingTransaction.status = 'completed';
-            pendingTransaction.amount = creditAmount;  // ← USE creditAmount
+            pendingTransaction.amount = creditAmount;
             pendingTransaction.newBalance = newBalance;
             pendingTransaction.previousBalance = oldBalance;
             pendingTransaction.cashwyreReference = cashwyreCode;
             pendingTransaction.completedAt = new Date(settledOn || new Date());
-            pendingTransaction.description = `Wallet Funding - ₦${creditAmount} credited (Fee: ₦${feeDeducted} removed)`;
+            pendingTransaction.description = `Wallet Funding - ₦${creditAmount} credited (Fee: ₦${feeDeducted || (amountPaid - creditAmount)} removed)`;
             pendingTransaction.metadata = {
                 ...pendingTransaction.metadata,
                 accountNumber: accountNumber,
@@ -2451,13 +2600,13 @@ app.post('/api/webhooks/cashwyre-process', async (req, res) => {
             const newTransaction = new Transaction({
                 userId: user._id,
                 type: 'wallet_funding',
-                amount: creditAmount,  // ← USE creditAmount
+                amount: creditAmount,
                 previousBalance: oldBalance,
                 newBalance: newBalance,
                 reference: cashwyreCode,
                 cashwyreReference: cashwyreCode,
                 status: 'completed',
-                description: `Wallet Funding - ₦${creditAmount} credited (Fee: ₦${feeDeducted} removed)`,
+                description: `Wallet Funding - ₦${creditAmount} credited (Fee: ₦${feeDeducted || (amountPaid - creditAmount)} removed)`,
                 createdAt: new Date(),
                 completedAt: new Date(settledOn || new Date()),
                 metadata: {
@@ -2489,1493 +2638,6 @@ app.post('/api/webhooks/cashwyre-process', async (req, res) => {
         console.error('❌ Webhook error:', error.message);
         console.error('Stack:', error.stack);
     }
-});
-
-
-
-
-// ==================== WEBHOOK ====================
-app.post('/api/webhooks/cashwyre', async (req, res) => {
-  try {
-    console.log('Webhook received:', req.rawBody?.toString() || JSON.stringify(req.body));
-    
-    let webhookData;
-    if (req.rawBody) {
-      webhookData = JSON.parse(req.rawBody.toString());
-    } else {
-      webhookData = req.body;
-    }
-    
-    const { eventType, eventData } = webhookData;
-    
-    if (eventType === 'fiat_deposit.success') {
-      const { AccountNumber, AmountSettled, Code, RequestId, Narration, BankName } = eventData;
-      
-      const virtualAccount = await VirtualAccount.findOne({ accountNumber: AccountNumber });
-      if (virtualAccount) {
-        const amount = parseFloat(AmountSettled);
-        const reference = `CASHWYRE_${Code || RequestId || Date.now()}`;
-        
-        const existingTx = await Transaction.findOne({ reference });
-        if (!existingTx) {
-          await updateWalletBalance(
-            virtualAccount.userId,
-            amount,
-            'credit',
-            reference,
-            Narration || `Deposit from ${BankName} - ${AccountNumber}`,
-            { source: 'cashwyre_webhook', paymentMethod: 'bank_transfer' }
-          );
-          console.log(`✅ Processed deposit: ₦${amount} for user ${virtualAccount.userId}`);
-        }
-      }
-    }
-    
-    res.status(200).json({ success: true, message: 'Webhook received' });
-  } catch (error) {
-    console.error('Webhook error:', error.message);
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-// ==================== CASHWYRE FIAT DEPOSIT WEBHOOK ====================
-app.post('/api/webhooks/cashwyre-fiat', async (req, res) => {
-  try {
-    console.log('💰 Cashwyre Fiat Deposit Webhook Received');
-    console.log('Raw body:', req.rawBody?.toString());
-    console.log('Parsed body:', JSON.stringify(req.body, null, 2));
-    
-    let webhookData;
-    if (req.rawBody) {
-      webhookData = JSON.parse(req.rawBody.toString());
-    } else {
-      webhookData = req.body;
-    }
-    
-    const { eventType, eventData } = webhookData;
-    
-    if (eventType === 'fiat_deposit.success' || eventType === 'fiat.deposit.success') {
-      console.log('✅ Processing fiat deposit webhook');
-      
-      const {
-        Code,
-        AmountPaid,
-        AmountSettled,
-        Currency,
-        AccountNumber,
-        AccountName,
-        BankName,
-        BankCode,
-        Country,
-        Narration,
-        Status,
-        RequestId,
-        SettledOn,
-        SourceOfPayment,
-        FundingMethod
-      } = eventData;
-      
-      if (Status !== 'success') {
-        console.log(`⚠️ Payment not successful: ${Status}`);
-        return res.status(200).json({ success: false, message: 'Payment not successful' });
-      }
-      
-      const virtualAccount = await VirtualAccount.findOne({ 
-        accountNumber: AccountNumber,
-        active: true
-      }).sort({ createdAt: -1 });
-      
-      if (!virtualAccount) {
-        console.log(`❌ Virtual account not found for: ${AccountNumber}`);
-        
-        await UnmatchedWebhook.create({
-          reference: Code,
-          payload: req.body,
-          receivedAt: new Date()
-        });
-        
-        return res.status(200).json({ success: false, message: 'Virtual account not found' });
-      }
-      
-      console.log(`✅ Found virtual account for user: ${virtualAccount.userId}`);
-      
-      const amount = parseFloat(AmountSettled || AmountPaid || 0);
-      const reference = `CASHWYRE_${Code || RequestId || Date.now()}`;
-      
-      const existingTx = await Transaction.findOne({ reference });
-      if (existingTx) {
-        console.log(`⚠️ Transaction already processed: ${reference}`);
-        return res.status(200).json({ success: true, message: 'Already processed' });
-      }
-      
-      const existingByCashwyre = await Transaction.findOne({ cashwyreReference: Code || RequestId });
-      if (existingByCashwyre) {
-        console.log(`⚠️ Transaction already processed by cashwyre ref: ${Code || RequestId}`);
-        return res.status(200).json({ success: true, message: 'Already processed' });
-      }
-      
-      const result = await updateWalletBalance(
-        virtualAccount.userId,
-        amount,
-        'credit',
-        reference,
-        Narration || `Deposit from ${BankName} - ${AccountNumber}`,
-        {
-          source: 'cashwyre_webhook',
-          paymentMethod: FundingMethod || 'bank_transfer',
-          bankName: BankName,
-          bankCode: BankCode,
-          accountNumber: AccountNumber,
-          accountName: AccountName,
-          currency: Currency || 'NGN',
-          cashwyreCode: Code,
-          cashwyreRequestId: RequestId,
-          settledOn: SettledOn,
-          sourceOfPayment: SourceOfPayment
-        }
-      );
-      
-      virtualAccount.cashwyreReference = Code || RequestId;
-      virtualAccount.processedAt = new Date();
-      await virtualAccount.save();
-      
-      console.log(`✅ Successfully processed deposit: ₦${amount} for user ${virtualAccount.userId}`);
-      console.log(`💰 New balance: ₦${result.newBalance}`);
-      
-      return res.status(200).json({ 
-        success: true, 
-        message: 'Deposit processed successfully',
-        amount: amount,
-        newBalance: result.newBalance
-      });
-      
-    } else {
-      console.log(`⚠️ Unhandled event type: ${eventType}`);
-      return res.status(200).json({ success: false, message: 'Unhandled event type' });
-    }
-    
-  } catch (error) {
-    console.error('❌ Cashwyre webhook error:', error.message);
-    return res.status(200).json({ success: false, message: error.message });
-  }
-});
-
-
-
-// Add to server.js - Check sync status
-app.get('/api/sync/status/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    
-    const user = await User.findById(userId);
-    if (!user) {
-      return res.json({ success: false, message: 'User not found' });
-    }
-    
-    const lastTransaction = await Transaction.findOne({ userId: userId })
-      .sort({ completedAt: -1 })
-      .limit(1);
-    
-    res.json({
-      success: true,
-      walletBalance: user.walletBalance,
-      lastTransaction: lastTransaction ? {
-        amount: lastTransaction.amount,
-        status: lastTransaction.status,
-        date: lastTransaction.completedAt,
-        source: lastTransaction.metadata?.source
-      } : null
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-
-
-
-
-
-
-
-
-
-
-
-
-// ============================================
-// CHECK CASHWYRE TRANSACTION IN MONGODB
-// ============================================
-app.get('/api/payments/check-cashwyre-transaction/:reference', async (req, res) => {
-  try {
-    const { reference } = req.params;
-    const { userId } = req.query;
-    
-    console.log('🔍 Checking Cashwyre transaction:', reference);
-    
-    // Search in VirtualAccount table
-    const virtualAccount = await VirtualAccount.findOne({
-      $or: [
-        { cashwyreRequestId: reference },
-        { cashwyreReference: reference },
-        { reference: reference }
-      ]
-    });
-    
-    if (virtualAccount) {
-      // Check if already processed
-      const existingTransaction = await Transaction.findOne({
-        $or: [
-          { cashwyreReference: reference },
-          { reference: reference }
-        ],
-        status: 'completed'
-      });
-      
-      return res.json({
-        exists: true,
-        alreadyProcessed: existingTransaction != null,
-        userId: virtualAccount.userId,
-        amount: virtualAccount.amount,
-        totalPayable: virtualAccount.totalPayable,
-        status: existingTransaction ? 'completed' : 'pending',
-        expiresOn: virtualAccount.expiresOn
-      });
-    }
-    
-    // Search in Transaction table
-    const transaction = await Transaction.findOne({
-      $or: [
-        { reference: reference },
-        { cashwyreReference: reference }
-      ]
-    });
-    
-    if (transaction) {
-      return res.json({
-        exists: true,
-        alreadyProcessed: transaction.status === 'completed',
-        userId: transaction.userId,
-        amount: transaction.amount,
-        status: transaction.status
-      });
-    }
-    
-    res.json({ exists: false });
-    
-  } catch (error) {
-    console.error('Check transaction error:', error.message);
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-// ============================================
-// PROCESS CASHWYRE PAYMENT AND CREDIT USER
-// ============================================
-app.post('/api/payments/process-cashwyre-payment', async (req, res) => {
-  try {
-    const { userId, reference, amount, depositAmount, feeAmount, isPartial, isOverpaid, source } = req.body;
-    
-    console.log('💰 Processing Cashwyre payment credit:');
-    console.log('   User ID:', userId);
-    console.log('   Reference:', reference);
-    console.log('   Amount to credit: ₦${amount}');
-    console.log('   Deposit Amount: ₦${depositAmount}');
-    console.log('   Fee Amount: ₦${feeAmount}');
-    
-    const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found' });
-    }
-    
-    // Check if already processed
-    const existingTx = await Transaction.findOne({
-      $or: [
-        { reference: reference },
-        { cashwyreReference: reference }
-      ]
-    });
-    
-    if (existingTx && existingTx.status === 'completed') {
-      return res.json({
-        success: true,
-        alreadyProcessed: true,
-        newBalance: user.walletBalance,
-        message: 'Transaction already processed'
-      });
-    }
-    
-    const oldBalance = user.walletBalance;
-    const creditAmount = amount; // Credit the original amount
-    const newBalance = oldBalance + creditAmount;
-    
-    // Update user balance
-    user.walletBalance = newBalance;
-    user.updatedAt = new Date();
-    await user.save();
-    
-    // Update virtual account if exists
-    const virtualAccount = await VirtualAccount.findOne({
-      $or: [
-        { cashwyreRequestId: reference },
-        { cashwyreReference: reference },
-        { reference: reference }
-      ]
-    });
-    
-    if (virtualAccount) {
-      virtualAccount.active = false;
-      virtualAccount.processedAt = new Date();
-      virtualAccount.cashwyreReference = reference;
-      await virtualAccount.save();
-    }
-    
-    // Create transaction record
-    const transaction = new Transaction({
-      userId: user._id,
-      type: 'wallet_funding',
-      amount: creditAmount,
-      previousBalance: oldBalance,
-      newBalance: newBalance,
-      reference: reference,
-      cashwyreReference: reference,
-      status: 'completed',
-      description: `Cashwyre Virtual Account Funding - ₦${creditAmount} credited to wallet${isPartial ? ' (Partial payment)' : ''}${isOverpaid ? ' (Overpaid - credited original)' : ''}`,
-      metadata: {
-        source: source || 'transaction_validation_page',
-        depositAmount: depositAmount,
-        feeAmount: feeAmount,
-        isPartial: isPartial || false,
-        isOverpaid: isOverpaid || false,
-        verifiedAt: new Date()
-      },
-      completedAt: new Date()
-    });
-    
-    await transaction.save();
-    
-    console.log(`✅ User ${user.email} credited: ₦${creditAmount}`);
-    console.log(`💰 New balance: ₦${newBalance}`);
-    
-    res.json({
-      success: true,
-      newBalance: newBalance,
-      amount: creditAmount,
-      message: 'Payment processed successfully'
-    });
-    
-  } catch (error) {
-    console.error('Process payment error:', error.message);
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-
-
-
-// ==================== FIX ALL EXISTING TRANSACTION DATES ====================
-app.post('/api/admin/fix-transaction-dates', async (req, res) => {
-  try {
-    console.log('🔧 FIXING ALL TRANSACTION DATES...');
-    
-    // Find all transactions with wrong dates
-    const transactions = await Transaction.find({});
-    let fixedCount = 0;
-    
-    for (const tx of transactions) {
-      // Get the REAL timestamp from ObjectId
-      const realDate = tx._id.getTimestamp();
-      
-      // Only fix if date is wrong (older than 2026-04-14 or all same)
-      if (tx.createdAt && tx.createdAt.toISOString() === '2026-04-14T16:39:56.759Z') {
-        tx.createdAt = realDate;
-        await tx.save();
-        fixedCount++;
-        console.log(`✅ Fixed transaction ${tx._id}: ${realDate.toISOString()}`);
-      }
-    }
-    
-    console.log(`✅ Fixed ${fixedCount} transactions`);
-    
-    res.json({
-      success: true,
-      fixedCount: fixedCount,
-      message: `Fixed ${fixedCount} transaction dates`
-    });
-    
-  } catch (error) {
-    console.error('Fix dates error:', error.message);
-    res.status(500).json({ success: false, message: error.message });
-  }
-});// ==================== FIX ALL EXISTING TRANSACTION DATES ====================
-app.post('/api/admin/fix-transaction-dates', async (req, res) => {
-  try {
-    console.log('🔧 FIXING ALL TRANSACTION DATES...');
-    
-    // Find all transactions with wrong dates
-    const transactions = await Transaction.find({});
-    let fixedCount = 0;
-    
-    for (const tx of transactions) {
-      // Get the REAL timestamp from ObjectId
-      const realDate = tx._id.getTimestamp();
-      
-      // Only fix if date is wrong (older than 2026-04-14 or all same)
-      if (tx.createdAt && tx.createdAt.toISOString() === '2026-04-14T16:39:56.759Z') {
-        tx.createdAt = realDate;
-        await tx.save();
-        fixedCount++;
-        console.log(`✅ Fixed transaction ${tx._id}: ${realDate.toISOString()}`);
-      }
-    }
-    
-    console.log(`✅ Fixed ${fixedCount} transactions`);
-    
-    res.json({
-      success: true,
-      fixedCount: fixedCount,
-      message: `Fixed ${fixedCount} transaction dates`
-    });
-    
-  } catch (error) {
-    console.error('Fix dates error:', error.message);
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-
-
-
-// ============================================
-// FIX: Recover missing balance for existing transactions
-// ============================================
-app.post('/api/admin/recover-missing-balance', async (req, res) => {
-  try {
-    const { userId, reference } = req.body;
-    
-    console.log('🔄 Recovering missing balance for:', reference);
-    
-    // Find the pending/completed transaction
-    const transaction = await Transaction.findOne({
-      $or: [
-        { reference: reference },
-        { cashwyreReference: reference },
-        { 'metadata.cashwyreCode': reference }
-      ]
-    });
-    
-    if (!transaction) {
-      return res.status(404).json({ success: false, message: 'Transaction not found' });
-    }
-    
-    const user = await User.findById(transaction.userId);
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found' });
-    }
-    
-    // Check if balance was already updated
-    if (transaction.newBalance > 0 && transaction.newBalance !== transaction.previousBalance) {
-      return res.json({
-        success: true,
-        message: 'Balance already correct',
-        currentBalance: user.walletBalance,
-        transactionBalance: transaction.newBalance
-      });
-    }
-    
-    // Calculate correct balance
-    const oldBalance = user.walletBalance;
-    const amountToCredit = transaction.amount;
-    const newBalance = oldBalance + amountToCredit;
-    
-    // Update user balance
-    user.walletBalance = newBalance;
-    user.updatedAt = new Date();
-    await user.save();
-    
-    // Update transaction
-    transaction.newBalance = newBalance;
-    transaction.previousBalance = oldBalance;
-    transaction.status = 'completed';
-    transaction.completedAt = new Date();
-    transaction.metadata = {
-      ...transaction.metadata,
-      balanceRecovered: true,
-      recoveredAt: new Date(),
-      oldBalanceBeforeRecovery: oldBalance
-    };
-    await transaction.save();
-    
-    console.log(`✅ Recovered ₦${amountToCredit} for user ${user.email}`);
-    console.log(`💰 Balance: ₦${oldBalance} → ₦${newBalance}`);
-    
-    res.json({
-      success: true,
-      amountRecovered: amountToCredit,
-      oldBalance: oldBalance,
-      newBalance: newBalance,
-      message: 'Balance recovered successfully'
-    });
-    
-  } catch (error) {
-    console.error('Recovery error:', error.message);
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-
-
-
-// ============================================
-// USER RECOVER MISSING BALANCE - SAVES TO MONGODB
-// ============================================
-app.post('/api/recover-missing-balance', async (req, res) => {
-  try {
-    const { userId, reference } = req.body;
-    
-    console.log('🔄 User requested balance recovery for:', reference);
-    console.log('   User ID:', userId);
-    
-    if (!reference) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Transaction reference is required' 
-      });
-    }
-    
-    // First, check if this transaction already exists in MongoDB
-    let existingTransaction = await Transaction.findOne({
-      $or: [
-        { reference: reference },
-        { cashwyreReference: reference },
-        { 'metadata.cashwyreCode': reference },
-        { 'metadata.requestId': reference }
-      ]
-    });
-    
-    if (existingTransaction) {
-      console.log('✅ Transaction found in MongoDB');
-      
-      // Check if already credited
-      if (existingTransaction.status === 'completed' && existingTransaction.newBalance > existingTransaction.previousBalance) {
-        return res.json({
-          success: true,
-          alreadyProcessed: true,
-          message: 'This transaction was already credited to your wallet.',
-          amount: existingTransaction.amount,
-          newBalance: existingTransaction.newBalance
-        });
-      }
-      
-      // Get user
-      const user = await User.findById(existingTransaction.userId);
-      if (!user) {
-        return res.status(404).json({ success: false, message: 'User not found' });
-      }
-      
-      // Check ownership
-      if (userId && user._id.toString() !== userId.toString()) {
-        return res.status(403).json({ success: false, message: 'This transaction does not belong to your account.' });
-      }
-      
-      // Credit the user
-      const oldBalance = user.walletBalance;
-      const creditAmount = existingTransaction.amount;
-      const newBalance = oldBalance + creditAmount;
-      
-      user.walletBalance = newBalance;
-      user.updatedAt = new Date();
-      await user.save();
-      
-      existingTransaction.status = 'completed';
-      existingTransaction.newBalance = newBalance;
-      existingTransaction.previousBalance = oldBalance;
-      existingTransaction.completedAt = new Date();
-      existingTransaction.metadata = {
-        ...existingTransaction.metadata,
-        balanceRecovered: true,
-        recoveredAt: new Date(),
-        recoveredBy: userId
-      };
-      await existingTransaction.save();
-      
-      console.log(`✅ Recovered ₦${creditAmount} for user ${user.email}`);
-      console.log(`💰 Balance: ₦${oldBalance} → ₦${newBalance}`);
-      
-      return res.json({
-        success: true,
-        amountRecovered: creditAmount,
-        oldBalance: oldBalance,
-        newBalance: newBalance,
-        message: `Successfully recovered ₦${creditAmount.toFixed(2)} to your wallet!`
-      });
-    }
-    
-    // If not found in MongoDB, check MySQL via your PHP webhook data
-    console.log('⚠️ Transaction not found in MongoDB, checking MySQL records...');
-    
-    // For the 3 transactions from your logs, create them in MongoDB
-    // This handles the transactions that only exist in MySQL
-    const knownTransactions = {
-      'MNFY|87|20260409234344|158580': {
-        amount: 100, // User requested amount
-        amountPaid: 121.8,
-        accountNumber: '6660155501',
-        status: 'PAID'
-      },
-      'MNFY|96|20260409235007|058483': {
-        amount: 100, // User requested amount
-        amountPaid: 150.0,
-        accountNumber: '6660689873',
-        status: 'OVERPAID'
-      },
-      'MNFY|11|20260410003422|385303': {
-        amount: 100, // User requested amount
-        amountPaid: 101.5,
-        accountNumber: '6660589739',
-        status: 'PAID'
-      }
-    };
-    
-    if (knownTransactions[reference]) {
-      console.log('✅ Found transaction in known records, creating in MongoDB...');
-      
-      const txData = knownTransactions[reference];
-      
-      // Find user by userId or by account number association
-      let user = await User.findById(userId);
-      if (!user) {
-        // Try to find user by email from your app_users table
-        // For now, use the provided userId
-        user = await User.findById(userId);
-        if (!user) {
-          return res.status(404).json({ success: false, message: 'User not found. Please make sure you are logged in.' });
-        }
-      }
-      
-      const oldBalance = user.walletBalance;
-      const creditAmount = txData.amount; // Credit the original amount (₦100)
-      const newBalance = oldBalance + creditAmount;
-      
-      // Update user balance
-      user.walletBalance = newBalance;
-      user.updatedAt = new Date();
-      await user.save();
-      
-      // Create transaction in MongoDB
-      const newTransaction = new Transaction({
-        userId: user._id,
-        type: 'wallet_funding',
-        amount: creditAmount,
-        previousBalance: oldBalance,
-        newBalance: newBalance,
-        reference: reference,
-        cashwyreReference: reference,
-        status: 'completed',
-        description: `Cashwyre Virtual Account Funding - ₦${creditAmount} credited to wallet (Recovered from MySQL)`,
-        metadata: {
-          source: 'user_balance_recovery',
-          accountNumber: txData.accountNumber,
-          amountPaid: txData.amountPaid,
-          status: txData.status,
-          recoveredAt: new Date(),
-          recoveredBy: userId,
-          originalSource: 'mysql_webhook'
-        },
-        completedAt: new Date()
-      });
-      
-      await newTransaction.save();
-      
-      console.log(`✅ Created transaction in MongoDB and credited ₦${creditAmount} for user ${user.email}`);
-      console.log(`💰 Balance: ₦${oldBalance} → ₦${newBalance}`);
-      
-      return res.json({
-        success: true,
-        amountRecovered: creditAmount,
-        oldBalance: oldBalance,
-        newBalance: newBalance,
-        message: `Successfully recovered ₦${creditAmount.toFixed(2)} to your wallet!`
-      });
-    }
-    
-    // If all else fails
-    return res.status(404).json({ 
-      success: false, 
-      message: 'Transaction not found. Please check your reference and try again, or contact support.' 
-    });
-    
-  } catch (error) {
-    console.error('Recovery error:', error.message);
-    res.status(500).json({ 
-      success: false, 
-      message: 'An error occurred while recovering your transaction. Please try again or contact support.' 
-    });
-  }
-});
-
-
-
-
-// ============================================
-// CREATE PENDING TRANSACTION (When user initiates funding)
-// ============================================
-app.post('/api/transactions/create-pending', async (req, res) => {
-    try {
-        const { userId, amount, reference, accountNumber, totalPayable, fee } = req.body;
-        
-        if (!userId || !amount) {
-            return res.status(400).json({ success: false, message: 'Missing required fields' });
-        }
-        
-        const user = await User.findById(userId);
-        if (!user) {
-            return res.status(404).json({ success: false, message: 'User not found' });
-        }
-        
-        const currentBalance = user.walletBalance;
-        
-        // Check if transaction already exists
-        const existing = await Transaction.findOne({ reference: reference });
-        if (existing) {
-            return res.json({ success: true, alreadyExists: true, transaction: existing });
-        }
-        
-        // Create pending transaction
-        const transaction = new Transaction({
-            userId: user._id,
-            type: 'wallet_funding',
-            amount: amount,
-            previousBalance: currentBalance,
-            newBalance: currentBalance,
-            reference: reference,
-            cashwyreReference: reference,
-            status: 'pending',
-            description: `Pending Cashwyre funding - ₦${amount}`,
-            metadata: {
-                source: 'cashwyre_pending',
-                accountNumber: accountNumber,
-                totalPayable: totalPayable,
-                fee: fee,
-                initiatedAt: new Date()
-            },
-            completedAt: null
-        });
-        
-        await transaction.save();
-        
-        console.log(`📝 Pending transaction created: ${reference}`);
-        
-        res.json({
-            success: true,
-            transaction: transaction,
-            message: 'Pending transaction created successfully'
-        });
-        
-    } catch (error) {
-        console.error('Create pending error:', error.message);
-        res.status(500).json({ success: false, message: error.message });
-    }
-});
-
-
-
-
-
-// ============================================
-// USER RECOVER MISSING BALANCE - SAVES TO MONGODB
-// ============================================
-app.post('/api/recover-missing-balance', async (req, res) => {
-  try {
-    const { userId, reference } = req.body;
-    
-    console.log('🔄 User requested balance recovery for:', reference);
-    console.log('   User ID:', userId);
-    
-    if (!reference) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Transaction reference is required' 
-      });
-    }
-    
-    // Find the user
-    const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'User not found. Please log in again.' 
-      });
-    }
-    
-    // Check if transaction already exists in MongoDB
-    let existingTransaction = await Transaction.findOne({
-      $or: [
-        { reference: reference },
-        { cashwyreReference: reference },
-        { 'metadata.cashwyreCode': reference },
-        { 'metadata.requestId': reference }
-      ]
-    });
-    
-    if (existingTransaction) {
-      // Check if already credited
-      if (existingTransaction.status === 'completed' && existingTransaction.newBalance > existingTransaction.previousBalance) {
-        return res.json({
-          success: true,
-          alreadyProcessed: true,
-          message: 'This transaction was already credited to your wallet.',
-          amount: existingTransaction.amount,
-          newBalance: existingTransaction.newBalance
-        });
-      }
-      
-      // Credit the user
-      const oldBalance = user.walletBalance;
-      const creditAmount = existingTransaction.amount;
-      const newBalance = oldBalance + creditAmount;
-      
-      user.walletBalance = newBalance;
-      user.updatedAt = new Date();
-      await user.save();
-      
-      existingTransaction.status = 'completed';
-      existingTransaction.newBalance = newBalance;
-      existingTransaction.previousBalance = oldBalance;
-      existingTransaction.completedAt = new Date();
-      existingTransaction.metadata = {
-        ...existingTransaction.metadata,
-        balanceRecovered: true,
-        recoveredAt: new Date(),
-        recoveredBy: userId
-      };
-      await existingTransaction.save();
-      
-      console.log(`✅ Recovered ₦${creditAmount} for user ${user.email}`);
-      console.log(`💰 Balance: ₦${oldBalance} → ₦${newBalance}`);
-      
-      return res.json({
-        success: true,
-        amountRecovered: creditAmount,
-        oldBalance: oldBalance,
-        newBalance: newBalance,
-        message: `Successfully recovered ₦${creditAmount.toFixed(2)} to your wallet!`
-      });
-    }
-    
-    // Transaction not found in MongoDB - Create from known data
-    // Map of references from your webhook logs
-    const knownTransactions = {
-      'MNFY|87|20260409234344|158580': {
-        amount: 100,
-        amountPaid: 121.8,
-        accountNumber: '6660155501',
-        status: 'PAID',
-        settledOn: '2026-04-09 23:45:10.0'
-      },
-      'MNFY|96|20260409235007|058483': {
-        amount: 100,
-        amountPaid: 150.0,
-        accountNumber: '6660689873',
-        status: 'OVERPAID',
-        settledOn: '2026-04-10 00:15:46.0'
-      },
-      'MNFY|11|20260410003422|385303': {
-        amount: 100,
-        amountPaid: 101.5,
-        accountNumber: '6660589739',
-        status: 'PAID',
-        settledOn: '2026-04-10 00:36:30.0'
-      }
-    };
-    
-    const txData = knownTransactions[reference];
-    if (!txData) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Transaction not found. Please check your reference and try again.' 
-      });
-    }
-    
-    console.log('✅ Found transaction in known records, creating in MongoDB...');
-    
-    const oldBalance = user.walletBalance;
-    const creditAmount = txData.amount; // Credit ₦100 (the original amount user wanted)
-    const newBalance = oldBalance + creditAmount;
-    
-    // Update user balance
-    user.walletBalance = newBalance;
-    user.updatedAt = new Date();
-    await user.save();
-    
-    // Create transaction in MongoDB
-    const newTransaction = new Transaction({
-      userId: user._id,
-      type: 'wallet_funding',
-      amount: creditAmount,
-      previousBalance: oldBalance,
-      newBalance: newBalance,
-      reference: reference,
-      cashwyreReference: reference,
-      status: 'completed',
-      description: `Cashwyre Wallet Funding - ₦${creditAmount} credited to wallet`,
-      metadata: {
-        source: 'user_balance_recovery',
-        accountNumber: txData.accountNumber,
-        amountPaid: txData.amountPaid,
-        status: txData.status,
-        settledOn: txData.settledOn,
-        recoveredAt: new Date(),
-        recoveredBy: userId,
-        originalSource: 'mysql_webhook_recovery'
-      },
-      completedAt: new Date(txData.settledOn || new Date())
-    });
-    
-    await newTransaction.save();
-    
-    console.log(`✅ Created transaction in MongoDB: ${newTransaction._id}`);
-    console.log(`💰 Credited ₦${creditAmount} to user ${user.email}`);
-    console.log(`💰 Balance: ₦${oldBalance} → ₦${newBalance}`);
-    
-    // Also update virtual account if exists
-    const virtualAccount = await VirtualAccount.findOne({ accountNumber: txData.accountNumber });
-    if (virtualAccount) {
-      virtualAccount.active = false;
-      virtualAccount.processedAt = new Date();
-      virtualAccount.cashwyreReference = reference;
-      await virtualAccount.save();
-      console.log(`✅ Updated virtual account: ${virtualAccount.accountNumber}`);
-    }
-    
-    return res.json({
-      success: true,
-      amountRecovered: creditAmount,
-      oldBalance: oldBalance,
-      newBalance: newBalance,
-      message: `Successfully recovered ₦${creditAmount.toFixed(2)} to your wallet!`,
-      transactionId: newTransaction._id
-    });
-    
-  } catch (error) {
-    console.error('Recovery error:', error.message);
-    res.status(500).json({ 
-      success: false, 
-      message: 'An error occurred while recovering your transaction. Please try again or contact support.' 
-    });
-  }
-});
-
-
-
-
-// ==================== MANUAL BALANCE RECOVERY ENDPOINT ====================
-app.post('/api/admin/recover-payment', async (req, res) => {
-  try {
-    const { userId, amount, reference, cashwyreCode, accountNumber } = req.body;
-    
-    console.log('🔄 MANUAL RECOVERY REQUEST:');
-    console.log('   User ID:', userId);
-    console.log('   Amount: ₦' + amount);
-    console.log('   Cashwyre Code:', cashwyreCode);
-    
-    if (!userId || !amount) {
-      return res.status(400).json({ success: false, message: 'Missing userId or amount' });
-    }
-    
-    const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found' });
-    }
-    
-    // Check if already processed
-    const existingTx = await Transaction.findOne({ cashwyreReference: cashwyreCode });
-    if (existingTx) {
-      return res.json({ 
-        success: true, 
-        message: 'Already processed',
-        alreadyProcessed: true,
-        newBalance: user.walletBalance
-      });
-    }
-    
-    // Update balance
-    const oldBalance = user.walletBalance;
-    const newBalance = oldBalance + amount;
-    
-    user.walletBalance = newBalance;
-    await user.save();
-    
-    // Create transaction record
-    const transaction = new Transaction({
-      userId: user._id,
-      type: 'wallet_funding',
-      amount: amount,
-      previousBalance: oldBalance,
-      newBalance: newBalance,
-      reference: cashwyreCode || `MANUAL_${Date.now()}`,
-      cashwyreReference: cashwyreCode,
-      status: 'completed',
-      description: `MANUAL RECOVERY: Cashwyre Deposit - ${accountNumber || ''}`,
-      metadata: {
-        source: 'manual_recovery',
-        accountNumber: accountNumber,
-        cashwyreCode: cashwyreCode,
-        recoveredAt: new Date()
-      },
-      completedAt: new Date()
-    });
-    
-    await transaction.save();
-    
-    console.log('✅ MANUAL RECOVERY SUCCESSFUL!');
-    console.log('   Old Balance: ₦' + oldBalance);
-    console.log('   New Balance: ₦' + newBalance);
-    
-    res.json({
-      success: true,
-      message: 'Payment recovered successfully',
-      newBalance: newBalance,
-      oldBalance: oldBalance,
-      transaction: transaction
-    });
-    
-  } catch (error) {
-    console.error('Manual recovery error:', error.message);
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-// ==================== GET PENDING TRANSACTIONS ====================
-app.get('/api/admin/pending-transactions', async (req, res) => {
-  try {
-    const pendingTransactions = await VirtualAccount.find({
-      active: true,
-      expiresOn: { $gt: new Date() }
-    }).sort({ createdAt: -1 }).limit(20);
-    
-    res.json({
-      success: true,
-      transactions: pendingTransactions,
-      count: pendingTransactions.length
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-
-
-
-// ==================== FORCE BALANCE REFRESH FOR FLUTTER APP ====================
-// ==================== FORCE BALANCE REFRESH FOR FLUTTER APP ====================
-app.post('/api/wallet/force-refresh', async (req, res) => {
-  try {
-    const { userId } = req.body;
-    
-    if (!userId) {
-      return res.status(400).json({ success: false, message: 'User ID required' });
-    }
-    
-    // Check cooldown - prevent multiple calls in short time
-    const lastRefresh = forceRefreshCooldown.get(userId);
-    const now = Date.now();
-    if (lastRefresh && (now - lastRefresh) < FORCE_REFRESH_DELAY) {
-      // Silent skip - don't log every time
-      return res.json({ 
-        success: true, 
-        message: 'Refresh skipped - cooldown active',
-        cooldown: true,
-        skipLog: true
-      });
-    }
-    
-    // Update last refresh time
-    forceRefreshCooldown.set(userId, now);
-    
-    // Only log occasionally (every 10th refresh or when not in cooldown)
-    const refreshCount = forceRefreshCooldown.get(`${userId}_count`) || 0;
-    forceRefreshCooldown.set(`${userId}_count`, refreshCount + 1);
-    
-    if (refreshCount % 10 === 0) {
-      console.log(`🔄 Force balance refresh for user: ${userId} (${refreshCount + 1} total)`);
-    }
-    
-    const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found' });
-    }
-    
-    // Get the last 5 transactions for this user
-    const recentTransactions = await Transaction.find({ userId: userId })
-      .sort({ completedAt: -1 })
-      .limit(5);
-    
-    res.json({
-      success: true,
-      walletBalance: user.walletBalance,
-      commissionBalance: user.commissionBalance,
-      lastTransaction: recentTransactions.length > 0 ? {
-        amount: recentTransactions[0].amount,
-        type: recentTransactions[0].type,
-        status: recentTransactions[0].status,
-        date: recentTransactions[0].completedAt,
-        reference: recentTransactions[0].reference
-      } : null,
-      transactions: recentTransactions,
-      message: 'Balance refreshed successfully'
-    });
-    
-  } catch (error) {
-    console.error('Force refresh error:', error.message);
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-
-
-
-
-// ============================================
-// GET PENDING TRANSACTION BY ACCOUNT NUMBER
-// ============================================
-app.get('/api/transactions/pending-by-account/:accountNumber', async (req, res) => {
-    try {
-        const { accountNumber } = req.params;
-        
-        console.log(`🔍 Looking for pending transaction for account: ${accountNumber}`);
-        
-        // Find virtual account first
-        const virtualAccount = await VirtualAccount.findOne({
-            accountNumber: accountNumber,
-            active: true
-        }).sort({ createdAt: -1 });
-        
-        if (!virtualAccount) {
-            console.log('❌ No virtual account found for:', accountNumber);
-            return res.json({ success: false, message: 'No virtual account found' });
-        }
-        
-        // Find pending transaction
-        const transaction = await Transaction.findOne({
-            userId: virtualAccount.userId,
-            status: 'pending',
-            'metadata.accountNumber': accountNumber
-        }).sort({ createdAt: -1 });
-        
-        if (transaction) {
-            console.log('✅ Found pending transaction:', transaction._id);
-            console.log('   Amount:', transaction.amount);
-            console.log('   Fee:', transaction.metadata?.fee || 0);
-            
-            return res.json({
-                success: true,
-                transaction: {
-                    amount: transaction.amount,
-                    fee: transaction.metadata?.fee || 0,
-                    totalPayable: transaction.metadata?.totalPayable || transaction.amount,
-                    reference: transaction.reference,
-                    createdAt: transaction.createdAt
-                }
-            });
-        }
-        
-        // If no pending transaction, return virtual account info
-        console.log('⚠️ No pending transaction found, returning virtual account info');
-        return res.json({
-            success: true,
-            transaction: {
-                amount: virtualAccount.amount,
-                fee: virtualAccount.fee || 0,
-                totalPayable: virtualAccount.totalPayable || virtualAccount.amount,
-                createdAt: virtualAccount.createdAt
-            }
-        });
-        
-    } catch (error) {
-        console.error('Error finding pending transaction:', error.message);
-        res.status(500).json({ success: false, message: error.message });
-    }
-});
-
-// ============================================
-// PROCESS CASHWYRE WEBHOOK - UPDATED V2
-// ============================================
-app.post('/api/webhooks/cashwyre-process', async (req, res) => {
-    console.log('💰💰💰 CASHWYRE WEBHOOK RECEIVED BY NODE.JS V2 💰💰💰');
-    console.log('Time:', new Date().toISOString());
-    console.log('Body:', JSON.stringify(req.body, null, 2));
-    
-    // ALWAYS respond immediately
-    res.status(200).json({ success: true, message: 'Processing' });
-    
-    // Process asynchronously to not block response
-    setImmediate(async () => {
-        try {
-            const { 
-                cashwyreCode, 
-                amountPaid, 
-                accountNumber, 
-                status, 
-                bankName, 
-                settledOn, 
-                isOverpaid, 
-                amountSettled,
-                netAmountToCredit,
-                feeDeducted,
-                originalRequestedAmount,
-                signature,
-                timestamp
-            } = req.body;
-            
-            // Verify signature to prevent tampering
-            const expectedSignature = crypto
-                .createHmac('sha256', process.env.WEBHOOK_SECRET || 'YOUR_SECRET_KEY_HERE')
-                .update(cashwyreCode + netAmountToCredit)
-                .digest('hex');
-            
-            if (signature && signature !== expectedSignature) {
-                console.log('⚠️ Invalid signature, potential tampering detected');
-                return;
-            }
-            
-            // Check if this webhook was already processed
-            const existingTx = await Transaction.findOne({
-                $or: [
-                    { cashwyreReference: cashwyreCode },
-                    { reference: cashwyreCode }
-                ]
-            });
-            
-            if (existingTx && existingTx.status === 'completed') {
-                console.log('⚠️ Transaction already processed:', cashwyreCode);
-                return;
-            }
-            
-            console.log(`📋 Processing for account: ${accountNumber}`);
-            console.log(`💰 Amount Paid: ₦${amountPaid}`);
-            console.log(`💰 Fee Deducted: ₦${feeDeducted}`);
-            console.log(`💰 NET AMOUNT TO CREDIT: ₦${netAmountToCredit}`);
-            
-            // Find virtual account
-            const virtualAccount = await VirtualAccount.findOne({ 
-                accountNumber: accountNumber
-            }).sort({ createdAt: -1 });
-            
-            if (!virtualAccount) {
-                console.log('❌ No virtual account found for:', accountNumber);
-                return;
-            }
-            
-            const user = await User.findById(virtualAccount.userId);
-            if (!user) {
-                console.log('❌ User not found:', virtualAccount.userId);
-                return;
-            }
-            
-            // Determine credit amount
-            let creditAmount = 0;
-            
-            if (netAmountToCredit !== undefined && netAmountToCredit >= 0) {
-                creditAmount = netAmountToCredit;
-                console.log(`💰 Using net amount from PHP: ₦${creditAmount}`);
-            } else {
-                // Fallback calculation
-                let fee = 0;
-                if (amountPaid >= 50000) {
-                    fee = 100;
-                } else {
-                    fee = 50;
-                }
-                
-                if (status === 'PARTIALLY_PAID') {
-                    creditAmount = Math.max(0, amountPaid - fee);
-                } else if (status === 'OVERPAID') {
-                    creditAmount = virtualAccount.amount || Math.max(0, amountPaid - fee);
-                } else {
-                    creditAmount = Math.max(0, amountPaid - fee);
-                }
-                console.log(`💰 Calculated credit amount: ₦${creditAmount}`);
-            }
-            
-            // Don't credit if amount is 0 or negative
-            if (creditAmount <= 0) {
-                console.log(`⚠️ No credit amount (₦${creditAmount}), skipping balance update`);
-                
-                // Still mark virtual account as processed
-                virtualAccount.active = false;
-                virtualAccount.processedAt = new Date();
-                virtualAccount.cashwyreReference = cashwyreCode;
-                await virtualAccount.save();
-                
-                // Create transaction record for zero credit
-                const zeroTransaction = new Transaction({
-                    userId: user._id,
-                    type: 'wallet_funding',
-                    amount: 0,
-                    previousBalance: user.walletBalance,
-                    newBalance: user.walletBalance,
-                    reference: cashwyreCode,
-                    cashwyreReference: cashwyreCode,
-                    status: 'completed',
-                    description: `Payment received but fee exceeded amount - No credit given (Paid: ₦${amountPaid}, Fee: ₦${feeDeducted})`,
-                    metadata: {
-                        accountNumber: accountNumber,
-                        source: 'cashwyre_webhook',
-                        amountPaid: amountPaid,
-                        feeDeducted: feeDeducted,
-                        netAmountToCredit: 0,
-                        status: status,
-                        isOverpaid: isOverpaid || false,
-                        bankName: bankName,
-                        cashwyreCode: cashwyreCode,
-                        noCreditGiven: true
-                    },
-                    completedAt: new Date(settledOn || new Date())
-                });
-                await zeroTransaction.save();
-                
-                console.log(`✅ Virtual account marked as processed, no credit given`);
-                return;
-            }
-            
-            // Update user balance with atomic operation
-            const oldBalance = user.walletBalance;
-            const newBalance = oldBalance + creditAmount;
-            
-            // Use findOneAndUpdate for atomic operation
-            const updatedUser = await User.findOneAndUpdate(
-                { _id: user._id, walletBalance: oldBalance },
-                { 
-                    $set: { 
-                        walletBalance: newBalance,
-                        updatedAt: new Date()
-                    }
-                },
-                { new: true, runValidators: true }
-            );
-            
-            if (!updatedUser) {
-                console.log('❌ Balance update failed - race condition detected');
-                return;
-            }
-            
-            console.log(`✅ User balance updated: ₦${oldBalance} → ₦${newBalance}`);
-            
-            // Mark virtual account as processed
-            virtualAccount.active = false;
-            virtualAccount.processedAt = new Date();
-            virtualAccount.cashwyreReference = cashwyreCode;
-            await virtualAccount.save();
-            console.log(`✅ Virtual account ${accountNumber} marked as inactive`);
-            
-            // Find or create transaction
-            let pendingTransaction = await Transaction.findOne({ 
-                userId: virtualAccount.userId,
-                $or: [
-                    { status: 'pending' },
-                    { 'metadata.accountNumber': accountNumber },
-                    { cashwyreReference: cashwyreCode }
-                ]
-            }).sort({ createdAt: -1 });
-            
-            if (pendingTransaction && pendingTransaction.status === 'pending') {
-                // Update existing pending to completed
-                pendingTransaction.status = 'completed';
-                pendingTransaction.amount = creditAmount;
-                pendingTransaction.newBalance = newBalance;
-                pendingTransaction.previousBalance = oldBalance;
-                pendingTransaction.cashwyreReference = cashwyreCode;
-                pendingTransaction.completedAt = new Date(settledOn || new Date());
-                pendingTransaction.description = `Wallet Funding - ₦${creditAmount} credited (Fee: ₦${feeDeducted || (amountPaid - creditAmount)} removed)`;
-                pendingTransaction.metadata = {
-                    ...pendingTransaction.metadata,
-                    accountNumber: accountNumber,
-                    source: 'cashwyre_webhook',
-                    amountPaid: amountPaid,
-                    amountSettled: amountSettled,
-                    feeDeducted: feeDeducted || (amountPaid - creditAmount),
-                    netAmountToCredit: creditAmount,
-                    originalRequestedAmount: originalRequestedAmount || virtualAccount.amount,
-                    status: status,
-                    settledOn: settledOn,
-                    isOverpaid: isOverpaid || false,
-                    bankName: bankName,
-                    cashwyreCode: cashwyreCode,
-                    processedAt: new Date()
-                };
-                await pendingTransaction.save();
-                console.log('✅ Updated pending transaction to completed');
-            } else {
-                // Create new transaction
-                const newTransaction = new Transaction({
-                    userId: user._id,
-                    type: 'wallet_funding',
-                    amount: creditAmount,
-                    previousBalance: oldBalance,
-                    newBalance: newBalance,
-                    reference: cashwyreCode,
-                    cashwyreReference: cashwyreCode,
-                    status: 'completed',
-                    description: `Wallet Funding - ₦${creditAmount} credited (Fee: ₦${feeDeducted || (amountPaid - creditAmount)} removed)`,
-                    createdAt: new Date(),
-                    completedAt: new Date(settledOn || new Date()),
-                    metadata: {
-                        accountNumber: accountNumber,
-                        source: 'cashwyre_webhook',
-                        amountPaid: amountPaid,
-                        amountSettled: amountSettled,
-                        feeDeducted: feeDeducted || (amountPaid - creditAmount),
-                        netAmountToCredit: creditAmount,
-                        originalRequestedAmount: originalRequestedAmount || virtualAccount.amount,
-                        status: status,
-                        settledOn: settledOn,
-                        isOverpaid: isOverpaid || false,
-                        bankName: bankName,
-                        cashwyreCode: cashwyreCode,
-                        processedAt: new Date()
-                    },
-                });
-                await newTransaction.save();
-                console.log('✅ Created new transaction');
-            }
-            
-            // Log success
-            console.log(`✅✅✅ SUCCESS: User ${user.email} credited ₦${creditAmount}`);
-            console.log(`   💰 Balance: ₦${oldBalance} → ₦${newBalance}`);
-            console.log(`   💰 Fee Removed: ₦${feeDeducted || (amountPaid - creditAmount)}`);
-            
-        } catch (error) {
-            console.error('❌ Webhook error:', error.message);
-            console.error('Stack:', error.stack);
-        }
-    });
-});
-
-
-
-
-
-// ==================== GET LATEST TRANSACTIONS ====================
-app.get('/api/transactions/latest/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const { limit = 10 } = req.query;
-    
-    const transactions = await Transaction.find({ userId: userId })
-      .sort({ completedAt: -1 })
-      .limit(parseInt(limit));
-    
-    res.json({
-      success: true,
-      transactions: transactions,
-      count: transactions.length
-    });
-    
-  } catch (error) {
-    console.error('Error fetching latest transactions:', error.message);
-    res.status(500).json({ success: false, message: error.message });
-  }
 });
 
 
