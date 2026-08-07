@@ -168,6 +168,7 @@ TransactionSchema.pre('save', function(next) {
 
 
 // Find this schema in your server.js (around line 80-100)
+// Find this schema in your server.js (around line 80-100)
 const VirtualAccountSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   accountNumber: { type: String, required: true },
@@ -175,20 +176,28 @@ const VirtualAccountSchema = new mongoose.Schema({
   bankName: { type: String, required: true },
   bankCode: { type: String, required: true },
   currency: { type: String, default: 'NGN' },
-  amount: { type: Number, required: true },
-  totalPayable: { type: Number, required: true },
-  fee: { type: Number, required: true },
+  
+  // ============================================================
+  // 🔥 FIX: Make these fields optional for Reserve Accounts
+  // ============================================================
+  amount: { type: Number, default: 0 },          // ← Made optional
+  totalPayable: { type: Number, default: 0 },    // ← Made optional
+  fee: { type: Number, default: 0 },             // ← Made optional
+  
   cashwyreRequestId: { type: String, required: true, unique: true },
   cashwyreReference: { type: String },
-  expiresOn: { type: Date, required: true },
-  expiresOnInMins: { type: Number, required: true },
+  expiresOn: { type: Date, default: null },      // ← Made optional
+  expiresOnInMins: { type: Number, default: 0 }, // ← Made optional
   active: { type: Boolean, default: true },
   processedAt: { type: Date },
   createdAt: { type: Date, default: Date.now },
   
   // ADD THESE TWO FIELDS
   accountReference: { type: String, default: null },
-  status: { type: String, default: 'ACTIVE' }
+  status: { type: String, default: 'ACTIVE' },
+  
+  // ADD THIS FOR KYC METADATA
+  metadata: { type: mongoose.Schema.Types.Mixed, default: {} }
 });
 
 // Indexes
@@ -361,22 +370,26 @@ const createDynamicAccount = async (userId, amount) => {
       }
       
       // Store virtual account info in MongoDB
-      const virtualAccount = new VirtualAccount({
-        userId,
-        accountNumber: result.data.accountNumber,
-        accountName: result.data.accountName,
-        bankName: result.data.bankName,
-        bankCode: result.data.bankCode,
-        currency: result.data.currency || 'NGN',
-        amount: amount,
-        totalPayable: userTotalPayable,
-        fee: frontendDisplayFee,  // Store what user sees
-        cashwyreRequestId: requestId,
-        cashwyreReference: result.data.reference,
-        expiresOn: expiresOn,
-        expiresOnInMins: expiresOnInMins,
-        active: true
-      });
+      // In createDynamicAccount function (around line 120-140)
+const virtualAccount = new VirtualAccount({
+  userId,
+  accountNumber: result.data.accountNumber,
+  accountName: result.data.accountName,
+  bankName: result.data.bankName,
+  bankCode: result.data.bankCode,
+  currency: result.data.currency || 'NGN',
+  amount: amount,                          // ← REQUIRED for funding
+  totalPayable: userTotalPayable,          // ← REQUIRED for funding
+  fee: frontendDisplayFee,                 // ← REQUIRED for funding
+  cashwyreRequestId: requestId,
+  cashwyreReference: result.data.reference,
+  expiresOn: expiresOn,
+  expiresOnInMins: expiresOnInMins,
+  active: true,
+  accountReference: null,                  // ← Not a reserve account
+  status: 'ACTIVE',
+  metadata: { accountType: 'funding' }
+});
       
       await virtualAccount.save();
       
@@ -717,29 +730,39 @@ app.post('/api/cashwyre/reserve-account', async (req, res) => {
       console.log('\n💾 SAVING TO MONGODB...');
       
       const newAccount = new VirtualAccount({
-        userId: userId,
-        accountNumber: accountData.accountNumber,
-        accountName: accountData.accountName,
-        bankName: accountData.bankName || 'Moniepoint Microfinance Bank',
-        bankCode: accountData.bankCode || '50515',
-        currency: accountData.currency || 'NGN',
-        accountReference: accountReference,
-        active: true,
-        status: accountData.status || 'ACTIVE',
-        cashwyreRequestId: requestId,
-        expiresOn: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
-        expiresOnInMins: 525600,
-        createdAt: new Date(),
-        // Store KYC data
-        metadata: {
-          address: address,
-          dateOfBirth: dateOfBirth,
-          gender: gender,
-          bvn: bvn,
-          nin: nin,
-          kycSubmittedAt: new Date()
-        }
-      });
+  userId: userId,
+  accountNumber: accountData.accountNumber,
+  accountName: accountData.accountName,
+  bankName: accountData.bankName || 'Moniepoint Microfinance Bank',
+  bankCode: accountData.bankCode || '50515',
+  currency: accountData.currency || 'NGN',
+  accountReference: accountReference,
+  active: true,
+  status: accountData.status || 'ACTIVE',
+  cashwyreRequestId: requestId,
+  
+  // ============================================================
+  // 🔥 FIX: Provide default values for required fields
+  // ============================================================
+  amount: 0,                    // ← DEFAULT VALUE
+  totalPayable: 0,              // ← DEFAULT VALUE
+  fee: 0,                       // ← DEFAULT VALUE
+  expiresOn: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
+  expiresOnInMins: 525600,
+  
+  createdAt: new Date(),
+  
+  // Store KYC data
+  metadata: {
+    address: address,
+    dateOfBirth: dateOfBirth,
+    gender: gender,
+    bvn: bvn,
+    nin: nin,
+    kycSubmittedAt: new Date(),
+    accountType: 'reserve'  // ← ADD THIS TO DISTINGUISH FROM FUNDING
+  }
+});
 
       await newAccount.save();
       console.log(`✅ VirtualAccount saved with ID: ${newAccount._id}`);
