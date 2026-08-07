@@ -726,46 +726,73 @@ app.post('/api/cashwyre/reserve-account', async (req, res) => {
       console.log(`   Status: ${accountData.status || 'ACTIVE'}`);
       console.log(`   Created On: ${accountData.createdOn}`);
 
-      // 🔥 LOG 9: SAVE TO MONGODB
-      console.log('\n💾 SAVING TO MONGODB...');
-      
-      const newAccount = new VirtualAccount({
-  userId: userId,
-  accountNumber: accountData.accountNumber,
-  accountName: accountData.accountName,
-  bankName: accountData.bankName || 'Moniepoint Microfinance Bank',
-  bankCode: accountData.bankCode || '50515',
-  currency: accountData.currency || 'NGN',
-  accountReference: accountReference,
-  active: true,
-  status: accountData.status || 'ACTIVE',
-  cashwyreRequestId: requestId,
-  
-  // ============================================================
-  // 🔥 FIX: Provide default values for required fields
-  // ============================================================
-  amount: 0,                    // ← DEFAULT VALUE
-  totalPayable: 0,              // ← DEFAULT VALUE
-  fee: 0,                       // ← DEFAULT VALUE
-  expiresOn: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
-  expiresOnInMins: 525600,
-  
-  createdAt: new Date(),
-  
-  // Store KYC data
-  metadata: {
+    // 🔥 LOG 9: SAVE TO MONGODB
+console.log('\n💾 SAVING TO MONGODB...');
+
+// Check if account already exists by accountReference OR accountNumber
+let existingAccount = await VirtualAccount.findOne({
+  $or: [
+    { accountReference: accountReference },
+    { accountNumber: accountData.accountNumber }
+  ]
+});
+
+if (existingAccount) {
+  // Update existing account
+  console.log('🔄 Updating existing account:', existingAccount.accountNumber);
+  existingAccount.accountNumber = accountData.accountNumber;
+  existingAccount.accountName = accountData.accountName;
+  existingAccount.bankName = accountData.bankName || 'Moniepoint Microfinance Bank';
+  existingAccount.bankCode = accountData.bankCode || '50515';
+  existingAccount.status = accountData.status || 'ACTIVE';
+  existingAccount.active = true;
+  existingAccount.updatedAt = new Date();
+  existingAccount.metadata = {
+    ...existingAccount.metadata,
     address: address,
     dateOfBirth: dateOfBirth,
     gender: gender,
     bvn: bvn,
     nin: nin,
     kycSubmittedAt: new Date(),
-    accountType: 'reserve'  // ← ADD THIS TO DISTINGUISH FROM FUNDING
-  }
-});
+    accountType: 'reserve'
+  };
+  await existingAccount.save();
+  console.log(`✅ Updated existing account: ${existingAccount.accountNumber}`);
+} else {
+  // Create new account
+  const newAccount = new VirtualAccount({
+    userId: userId,
+    accountNumber: accountData.accountNumber,
+    accountName: accountData.accountName,
+    bankName: accountData.bankName || 'Moniepoint Microfinance Bank',
+    bankCode: accountData.bankCode || '50515',
+    currency: accountData.currency || 'NGN',
+    accountReference: accountReference,
+    active: true,
+    status: accountData.status || 'ACTIVE',
+    cashwyreRequestId: requestId,
+    amount: 0,
+    totalPayable: 0,
+    fee: 0,
+    expiresOn: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
+    expiresOnInMins: 525600,
+    createdAt: new Date(),
+    metadata: {
+      address: address,
+      dateOfBirth: dateOfBirth,
+      gender: gender,
+      bvn: bvn,
+      nin: nin,
+      kycSubmittedAt: new Date(),
+      accountType: 'reserve'
+    }
+  });
+  await newAccount.save();
+  console.log(`✅ Created new account: ${newAccount.accountNumber}`);
+}
 
-      await newAccount.save();
-      console.log(`✅ VirtualAccount saved with ID: ${newAccount._id}`);
+      
 
       // 🔥 LOG 10: UPDATE USER
       console.log('\n👤 UPDATING USER RECORD...');
@@ -903,51 +930,44 @@ app.get('/api/cashwyre/reserve-account', async (req, res) => {
       if (cashwyreResponse.data.success === true) {
         const accountData = cashwyreResponse.data.data;
 
-        // 🔥 STEP 4: Save/Update to MongoDB
-        let existingAccount = await VirtualAccount.findOne({
-          userId: userId,
-          accountReference: ref
-        });
-
-        if (existingAccount) {
-          // Update existing account
-          existingAccount.accountNumber = accountData.accountNumber;
-          existingAccount.accountName = accountData.accountName;
-          existingAccount.bankName = accountData.bankName || 'Moniepoint Microfinance Bank';
-          existingAccount.bankCode = accountData.bankCode || '50515';
-          existingAccount.status = accountData.status || 'ACTIVE';
-          existingAccount.active = accountData.status === 'ACTIVE';
-          existingAccount.updatedAt = new Date();
-          await existingAccount.save();
-          console.log('✅ Updated account in MongoDB');
-        } else {
-          // Create new account
-          const newAccount = new VirtualAccount({
+        // 🔥 STEP 4: Use findOneAndUpdate with upsert to avoid duplicate key errors
+        const result = await VirtualAccount.findOneAndUpdate(
+          { 
             userId: userId,
-            accountNumber: accountData.accountNumber,
-            accountName: accountData.accountName,
-            bankName: accountData.bankName || 'Moniepoint Microfinance Bank',
-            bankCode: accountData.bankCode || '50515',
-            currency: accountData.currency || 'NGN',
-            accountReference: ref,
-            active: accountData.status === 'ACTIVE',
-            status: accountData.status || 'ACTIVE',
-            cashwyreRequestId: requestId,
-            amount: 0,
-            totalPayable: 0,
-            fee: 0,
-            expiresOn: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
-            expiresOnInMins: 525600,
-            createdAt: new Date(),
-            metadata: {
-              accountType: 'reserve',
-              syncedFromCashwyre: true,
-              syncedAt: new Date()
+            accountReference: ref
+          },
+          {
+            $set: {
+              accountNumber: accountData.accountNumber,
+              accountName: accountData.accountName,
+              bankName: accountData.bankName || 'Moniepoint Microfinance Bank',
+              bankCode: accountData.bankCode || '50515',
+              currency: accountData.currency || 'NGN',
+              active: accountData.status === 'ACTIVE',
+              status: accountData.status || 'ACTIVE',
+              amount: 0,
+              totalPayable: 0,
+              fee: 0,
+              expiresOn: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
+              expiresOnInMins: 525600,
+              updatedAt: new Date(),
+              'metadata.accountType': 'reserve',
+              'metadata.syncedFromCashwyre': true,
+              'metadata.syncedAt': new Date()
+            },
+            $setOnInsert: {
+              cashwyreRequestId: requestId,
+              createdAt: new Date()
             }
-          });
-          await newAccount.save();
-          console.log('✅ Created new account in MongoDB');
-        }
+          },
+          { 
+            upsert: true, 
+            new: true,
+            runValidators: false
+          }
+        );
+
+        console.log('✅ Account saved/updated in MongoDB:', result.accountNumber);
 
         // 🔥 STEP 5: Return the account
         return res.json({
@@ -969,13 +989,12 @@ app.get('/api/cashwyre/reserve-account', async (req, res) => {
       // Fall through to MongoDB check
     }
 
-    // 🔥 STEP 6: Fallback to MongoDB if Cashwyre fails
-   // 🔥 STEP 6: Fallback to MongoDB - ONLY get reserve accounts
-const localAccount = await VirtualAccount.findOne({
-  userId: userId,
-  active: true,
-  'metadata.accountType': 'reserve'  // ← ONLY RESERVE ACCOUNTS
-}).sort({ createdAt: -1 });
+    // 🔥 STEP 6: Fallback to MongoDB - ONLY get reserve accounts
+    const localAccount = await VirtualAccount.findOne({
+      userId: userId,
+      active: true,
+      'metadata.accountType': 'reserve'
+    }).sort({ createdAt: -1 });
 
     if (localAccount) {
       console.log('📋 Found fallback account in MongoDB:', localAccount.accountNumber);
