@@ -851,6 +851,7 @@ app.post('/api/cashwyre/reserve-account', async (req, res) => {
 
 
 // Get Reserve Account by User ID or Account Reference
+// Get Reserve Account - FETCH FROM CASHWYRE FIRST
 app.get('/api/cashwyre/reserve-account', async (req, res) => {
   try {
     const { userId, accountReference } = req.query;
@@ -862,46 +863,30 @@ app.get('/api/cashwyre/reserve-account', async (req, res) => {
       });
     }
 
-    let query = {};
-    if (userId) {
-      query.userId = userId;
-    }
-    if (accountReference) {
-      query.accountReference = accountReference;
-    }
-
-    // First check local database
-    const localAccount = await VirtualAccount.findOne({
-      ...query,
-      active: true
-    }).sort({ createdAt: -1 });
-
-    if (localAccount) {
-      return res.json({
-        success: true,
-        hasAccount: true,
-        account: {
-          accountNumber: localAccount.accountNumber,
-          accountName: localAccount.accountName,
-          bankName: localAccount.bankName,
-          bankCode: localAccount.bankCode,
-          status: localAccount.status || 'ACTIVE',
-          accountReference: localAccount.accountReference,
-          createdOn: localAccount.createdOn
-        }
+    // 🔥 STEP 1: Find the user first
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
       });
     }
 
-    // If not found locally, check Cashwyre
-    if (accountReference) {
-      const requestId = `${Date.now()}${Math.random().toString(36).substring(2, 10)}`;
+    // 🔥 STEP 2: Use the user's accountReference (email) to check Cashwyre
+    const ref = accountReference || user.accountReference || user.email;
+    
+    console.log('🔍 Checking Cashwyre for account reference:', ref);
 
+    // 🔥 STEP 3: Fetch from Cashwyre FIRST
+    const requestId = `${Date.now()}${Math.random().toString(36).substring(2, 10)}`;
+
+    try {
       const cashwyreResponse = await axios.post(
         `${CASHWYRE_CONFIG.baseURL}/ReserveAccount/getReserveAccount`,
         {
           appId: CASHWYRE_CONFIG.businessCode,
           requestId: requestId,
-          AccountReference: accountReference
+          AccountReference: ref
         },
         {
           headers: {
@@ -913,28 +898,58 @@ app.get('/api/cashwyre/reserve-account', async (req, res) => {
         }
       );
 
+      console.log('📥 Cashwyre response:', JSON.stringify(cashwyreResponse.data, null, 2));
+
       if (cashwyreResponse.data.success === true) {
         const accountData = cashwyreResponse.data.data;
 
-        // Save to MongoDB for future
-        const newAccount = new VirtualAccount({
-          userId: userId || 'unknown',
-          accountNumber: accountData.accountNumber,
-          accountName: accountData.accountName,
-          bankName: accountData.bankName || 'Moniepoint Microfinance Bank',
-          bankCode: accountData.bankCode || '50515',
-          currency: accountData.currency || 'NGN',
-          accountReference: accountReference,
-          active: accountData.status === 'ACTIVE',
-          status: accountData.status || 'ACTIVE',
-          cashwyreRequestId: requestId,
-          expiresOn: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
-          expiresOnInMins: 525600,
-          createdAt: new Date()
+        // 🔥 STEP 4: Save/Update to MongoDB
+        let existingAccount = await VirtualAccount.findOne({
+          userId: userId,
+          accountReference: ref
         });
 
-        await newAccount.save();
+        if (existingAccount) {
+          // Update existing account
+          existingAccount.accountNumber = accountData.accountNumber;
+          existingAccount.accountName = accountData.accountName;
+          existingAccount.bankName = accountData.bankName || 'Moniepoint Microfinance Bank';
+          existingAccount.bankCode = accountData.bankCode || '50515';
+          existingAccount.status = accountData.status || 'ACTIVE';
+          existingAccount.active = accountData.status === 'ACTIVE';
+          existingAccount.updatedAt = new Date();
+          await existingAccount.save();
+          console.log('✅ Updated account in MongoDB');
+        } else {
+          // Create new account
+          const newAccount = new VirtualAccount({
+            userId: userId,
+            accountNumber: accountData.accountNumber,
+            accountName: accountData.accountName,
+            bankName: accountData.bankName || 'Moniepoint Microfinance Bank',
+            bankCode: accountData.bankCode || '50515',
+            currency: accountData.currency || 'NGN',
+            accountReference: ref,
+            active: accountData.status === 'ACTIVE',
+            status: accountData.status || 'ACTIVE',
+            cashwyreRequestId: requestId,
+            amount: 0,
+            totalPayable: 0,
+            fee: 0,
+            expiresOn: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
+            expiresOnInMins: 525600,
+            createdAt: new Date(),
+            metadata: {
+              accountType: 'reserve',
+              syncedFromCashwyre: true,
+              syncedAt: new Date()
+            }
+          });
+          await newAccount.save();
+          console.log('✅ Created new account in MongoDB');
+        }
 
+        // 🔥 STEP 5: Return the account
         return res.json({
           success: true,
           hasAccount: true,
@@ -944,11 +959,38 @@ app.get('/api/cashwyre/reserve-account', async (req, res) => {
             bankName: accountData.bankName || 'Moniepoint Microfinance Bank',
             bankCode: accountData.bankCode || '50515',
             status: accountData.status || 'ACTIVE',
-            accountReference: accountReference,
+            accountReference: ref,
             createdOn: accountData.createdOn
           }
         });
       }
+    } catch (cashwyreError) {
+      console.log('⚠️ Cashwyre fetch failed, checking MongoDB:', cashwyreError.message);
+      // Fall through to MongoDB check
+    }
+
+    // 🔥 STEP 6: Fallback to MongoDB if Cashwyre fails
+   // 🔥 STEP 6: Fallback to MongoDB - ONLY get reserve accounts
+const localAccount = await VirtualAccount.findOne({
+  userId: userId,
+  active: true,
+  'metadata.accountType': 'reserve'  // ← ONLY RESERVE ACCOUNTS
+}).sort({ createdAt: -1 });
+
+    if (localAccount) {
+      console.log('📋 Found fallback account in MongoDB:', localAccount.accountNumber);
+      return res.json({
+        success: true,
+        hasAccount: true,
+        account: {
+          accountNumber: localAccount.accountNumber,
+          accountName: localAccount.accountName,
+          bankName: localAccount.bankName,
+          bankCode: localAccount.bankCode,
+          status: localAccount.status || 'ACTIVE',
+          accountReference: localAccount.accountReference
+        }
+      });
     }
 
     return res.json({
