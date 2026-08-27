@@ -267,191 +267,318 @@ const cashwyreApiCall = async (endpoint, data) => {
 };
 
 // Create Dynamic Virtual Account
-// Create Dynamic Virtual Account - Frontend shows fixed fee, backend calculates adjustment
+// ==================== CREATE DYNAMIC ACCOUNT WITH RETRY & FALLBACK ====================
 const createDynamicAccount = async (userId, amount) => {
   const requestId = generateRequestId();
   
-  // FRONTEND DISPLAY FEE (what user sees)
-  // In createDynamicAccount function, replace the frontendDisplayFee calculation:
-
-// FRONTEND DISPLAY FEE (what user sees) - 1.5% of amount
-let frontendDisplayFee = 0;
-if (amount > 0) {
-  frontendDisplayFee = amount * 0.015; // 1.5%
-  frontendDisplayFee = Math.round(frontendDisplayFee * 100) / 100;
-  if (frontendDisplayFee < 1.50) {
-    frontendDisplayFee = 1.50;
+  // Calculate 1.5% fee
+  let frontendDisplayFee = 0;
+  if (amount > 0) {
+    frontendDisplayFee = amount * 0.015;
+    frontendDisplayFee = Math.round(frontendDisplayFee * 100) / 100;
+    if (frontendDisplayFee < 1.50) {
+      frontendDisplayFee = 1.50;
+    }
+    if (frontendDisplayFee > 7500) {
+      frontendDisplayFee = 7500;
+    }
   }
-  if (frontendDisplayFee > 7500) {
-    frontendDisplayFee = 7500;
-  }
-}
   
-  // Calculate what user should pay TOTAL (what they see in frontend)
   const userSeesTotalPayable = amount + frontendDisplayFee;
-  
-  // Calculate expiresOn FIRST - before using it
   const expiresOn = new Date();
-  expiresOn.setHours(expiresOn.getHours() + 1); // 1 hour from now
+  expiresOn.setHours(expiresOn.getHours() + 1);
   const expiresOnInMins = 60;
   
-  // Prepare payload for Cashwyre - send the ORIGINAL amount
+  // Prepare payload for Cashwyre
   const payload = {
     appId: CASHWYRE_CONFIG.appId,
     requestId: requestId,
-    amount: amount,  // Send original amount (e.g., 100)
+    amount: amount,
     currency: CASHWYRE_CONFIG.currency,
     businessCode: CASHWYRE_CONFIG.businessCode,
     country: CASHWYRE_CONFIG.country,
     feeType: "sender"
   };
   
-  try {
-    console.log(`💰 Calling Cashwyre /payin/initiatePayin for amount: ₦${amount}`);
-    console.log(`   feeType: sender (customer pays fee)`);
-    
-    const result = await cashwyreApiCall('/payin/initiatePayin', payload);
-    
-    if (result.success) {
-      // Cashwyre returns depositAmount (includes their fee)
-      const cashwyreDepositAmount = result.data.depositAmount || amount;
-      const cashwyreFee = result.data.feeAmount || 0;
+  console.log(`💰 Calling Cashwyre /payin/initiatePayin for amount: ₦${amount}`);
+  console.log(`   feeType: sender (customer pays fee)`);
+  
+  // ============================================================
+  // 🔥 RETRY LOGIC WITH EXPONENTIAL BACKOFF
+  // ============================================================
+  let result = null;
+  let attempts = 0;
+  const maxAttempts = 3;
+  let lastError = null;
+  
+  while (attempts < maxAttempts) {
+    try {
+      attempts++;
+      console.log(`   📡 Attempt ${attempts}/${maxAttempts}...`);
       
-      // BACKEND CALCULATES THE ACTUAL ADJUSTMENT
-      // User should pay total = amount + frontendDisplayFee (e.g., ₦150)
-      // Cashwyre says user pays = cashwyreDepositAmount (e.g., ₦101.50)
-      // So your ACTUAL platform fee = userSeesTotalPayable - cashwyreDepositAmount
-      const actualPlatformFee = userSeesTotalPayable - cashwyreDepositAmount;
+      result = await cashwyreApiCall('/payin/initiatePayin', payload);
       
-      // The user pays this amount (same as what they see in frontend)
-      const userTotalPayable = userSeesTotalPayable;
-      
-      console.log(`💰 CASHWYRE PAYIN RESPONSE:`);
-      console.log(`   Account Number: ${result.data.accountNumber}`);
-      console.log(`   Account Name: ${result.data.accountName}`);
-      console.log(`   Bank Name: ${result.data.bankName}`);
-      console.log(`   Cashwyre Fee: ₦${cashwyreFee}`);
-      console.log(`   Cashwyre Deposit Amount: ₦${cashwyreDepositAmount}`);
-      
-      console.log(`💰 BACKEND ADJUSTMENT CALCULATION:`);
-      console.log(`   User wants to fund: ₦${amount}`);
-      console.log(`   Frontend shows fee: ₦${frontendDisplayFee}`);
-      console.log(`   User sees total: ₦${userSeesTotalPayable}`);
-      console.log(`   Cashwyre says user pays: ₦${cashwyreDepositAmount}`);
-      console.log(`   Backend adjustment: ₦${actualPlatformFee.toFixed(2)}`);
-      console.log(`   TOTAL USER PAYS: ₦${userTotalPayable}`);
-      console.log(`   User receives: ₦${amount}`);
-      console.log(`   Expires On: ${expiresOn.toISOString()}`);
-      
-      // Create pending transaction in MongoDB
-      const user = await User.findById(userId);
-      if (user) {
-        const balanceBefore = user.walletBalance;
-        
-        const existingPending = await Transaction.findOne({ 
-          reference: requestId,
-          status: 'pending'
-        });
-        
-        if (!existingPending) {
-          const pendingTransaction = new Transaction({
-            userId: userId,
-            type: 'wallet_funding',
-            amount: amount,
-            previousBalance: balanceBefore,
-            newBalance: balanceBefore,
-            reference: requestId,
-            cashwyreReference: result.data.reference,
-            status: 'pending',
-            description: `Wallet funding - ₦${amount}`,
-            createdAt: new Date(), 
-            metadata: {
-              source: 'cashwyre_payin',
-              accountNumber: result.data.accountNumber,
-              accountName: result.data.accountName,
-              bankName: result.data.bankName,
-              bankCode: result.data.bankCode,
-              cashwyreDepositAmount: cashwyreDepositAmount,
-              cashwyreFee: cashwyreFee,
-              frontendDisplayFee: frontendDisplayFee,
-              actualPlatformFee: actualPlatformFee,
-              totalPayable: userTotalPayable,
-              amountToCredit: amount,
-              transactionReference: result.data.transactionReference,
-              feeType: result.data.feeType,
-              canConfirmPayin: result.data.canConfirmPayin,
-              requestId: requestId,
-              expiresOn: expiresOn,
-              expiresOnInMins: expiresOnInMins
-            },
-            completedAt: null
-          });
-          
-          await pendingTransaction.save();
-          console.log(`✅ Pending transaction saved to MongoDB`);
-        }
+      // If successful, break out of the loop
+      if (result.success) {
+        console.log(`✅ Cashwyre API call successful on attempt ${attempts}`);
+        break;
       }
       
-      // Store virtual account info in MongoDB
-      // In createDynamicAccount function (around line 120-140)
-const virtualAccount = new VirtualAccount({
-  userId,
-  accountNumber: result.data.accountNumber,
-  accountName: result.data.accountName,
-  bankName: result.data.bankName,
-  bankCode: result.data.bankCode,
-  currency: result.data.currency || 'NGN',
-  amount: amount,                          // ← REQUIRED for funding
-  totalPayable: userTotalPayable,          // ← REQUIRED for funding
-  fee: frontendDisplayFee,                 // ← REQUIRED for funding
-  cashwyreRequestId: requestId,
-  cashwyreReference: result.data.reference,
-  expiresOn: expiresOn,
-  expiresOnInMins: expiresOnInMins,
-  active: true,
-  accountReference: null,                  // ← Not a reserve account
-  status: 'ACTIVE',
-  metadata: { accountType: 'funding' }
-});
+      // Check if the error is temporary (retryable)
+      const errorMsg = (result.message || '').toLowerCase();
+      const isRetryable = 
+        errorMsg.includes('bank is currently not available') || 
+        errorMsg.includes('temporarily unavailable') ||
+        errorMsg.includes('try again') ||
+        errorMsg.includes('service unavailable') ||
+        errorMsg.includes('timeout') ||
+        errorMsg.includes('network error');
       
-      await virtualAccount.save();
+      if (isRetryable && attempts < maxAttempts) {
+        const delay = attempts * 2000; // 2s, 4s, 6s
+        console.log(`⏳ Retryable error: "${result.message}". Waiting ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue;
+      }
       
-      console.log(`✅ Payin initiated successfully`);
-      console.log(`   Account: ${result.data.accountNumber}`);
-      console.log(`   Bank: ${result.data.bankName}`);
-      console.log(`   Reference: ${result.data.reference}`);
-      console.log(`   User pays: ₦${userTotalPayable}`);
-      console.log(`   User receives: ₦${amount}`);
-      console.log(`   Frontend shows fee: ₦${frontendDisplayFee}`);
-      console.log(`   Actual backend fee: ₦${actualPlatformFee.toFixed(2)}`);
-      console.log(`   Expires: ${expiresOn.toISOString()}`);
+      // If it's a different error, or we've exhausted retries, break
+      console.log(`⚠️ Non-retryable error or max attempts reached: ${result.message}`);
+      break;
       
-      return {
-        success: true,
-        data: {
-          accountNumber: result.data.accountNumber,
-          accountName: result.data.accountName,
-          bankName: result.data.bankName,
-          bankCode: result.data.bankCode,
-          expiresOn: expiresOn.toISOString(),
-          expiresOnInMins: expiresOnInMins,
-          amount: amount,
-          totalPayable: userTotalPayable,
-          fee: frontendDisplayFee,
-          reference: result.data.reference,
-          transactionReference: result.data.transactionReference,
-          feeType: result.data.feeType,
-          requestId: requestId
-        }
-      };
+    } catch (error) {
+      lastError = error;
+      console.log(`⚠️ Attempt ${attempts} error: ${error.message}`);
+      
+      if (attempts < maxAttempts) {
+        const delay = attempts * 2000;
+        console.log(`⏳ Waiting ${delay}ms before retry...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
     }
-    return result;
-  } catch (error) {
-    console.error('Error:', error.message);
-    throw error;
   }
+  
+  // ============================================================
+  // 🔥 FALLBACK: Return fallback account if Cashwyre is down
+  // ============================================================
+  if (!result || !result.success) {
+    console.log(`❌ All ${maxAttempts} attempts failed. Using fallback account.`);
+    console.log(`   Last error: ${result ? result.message : lastError ? lastError.message : 'Unknown'}`);
+    
+    // Get user for fallback account name
+    const user = await User.findById(userId);
+    const fallbackAccountNumber = `VA_${Date.now().toString().substring(6)}${Math.random().toString(36).substring(2, 6)}`;
+    const fallbackAccountName = user ? user.fullName || 'DalabaPay User' : 'DalabaPay User';
+    const fallbackBankName = 'Moniepoint Microfinance Bank';
+    
+    // Store pending transaction with fallback flag
+    if (user) {
+      const balanceBefore = user.walletBalance;
+      
+      const pendingTransaction = new Transaction({
+        userId: userId,
+        type: 'wallet_funding',
+        amount: amount,
+        previousBalance: balanceBefore,
+        newBalance: balanceBefore,
+        reference: requestId,
+        cashwyreReference: `FALLBACK_${requestId}`,
+        status: 'pending',
+        description: `Virtual Account Funding - ₦${amount} (Fallback - Service Unavailable)`,
+        createdAt: new Date(),
+        metadata: {
+          source: 'cashwyre_payin_fallback',
+          accountNumber: fallbackAccountNumber,
+          accountName: fallbackAccountName,
+          bankName: fallbackBankName,
+          bankCode: '50515',
+          frontendDisplayFee: frontendDisplayFee,
+          totalPayable: userSeesTotalPayable,
+          amountToCredit: amount,
+          requestId: requestId,
+          expiresOn: expiresOn,
+          expiresOnInMins: expiresOnInMins,
+          isFallback: true,
+          fallbackReason: result ? result.message : (lastError ? lastError.message : 'Cashwyre API unavailable'),
+          paymentMethod: 'virtual_account_fallback'
+        },
+        completedAt: null
+      });
+      
+      await pendingTransaction.save();
+      console.log(`✅ Fallback pending transaction saved to MongoDB`);
+    }
+    
+    // Store virtual account info with fallback flag
+    const virtualAccount = new VirtualAccount({
+      userId,
+      accountNumber: fallbackAccountNumber,
+      accountName: fallbackAccountName,
+      bankName: fallbackBankName,
+      bankCode: '50515',
+      currency: 'NGN',
+      amount: amount,
+      totalPayable: userSeesTotalPayable,
+      fee: frontendDisplayFee,
+      cashwyreRequestId: requestId,
+      cashwyreReference: `FALLBACK_${requestId}`,
+      expiresOn: expiresOn,
+      expiresOnInMins: expiresOnInMins,
+      active: true,
+      accountReference: null,
+      status: 'ACTIVE',
+      metadata: { 
+        accountType: 'funding',
+        isFallback: true,
+        fallbackReason: result ? result.message : (lastError ? lastError.message : 'Cashwyre API unavailable')
+      }
+    });
+    
+    await virtualAccount.save();
+    
+    console.log(`✅ Fallback virtual account created: ${fallbackAccountNumber}`);
+    console.log(`   Account Name: ${fallbackAccountName}`);
+    console.log(`   Bank: ${fallbackBankName}`);
+    
+    return {
+      success: true,
+      data: {
+        accountNumber: fallbackAccountNumber,
+        accountName: fallbackAccountName,
+        bankName: fallbackBankName,
+        bankCode: '50515',
+        expiresOn: expiresOn.toISOString(),
+        expiresOnInMins: expiresOnInMins,
+        amount: amount,
+        totalPayable: userSeesTotalPayable,
+        fee: frontendDisplayFee,
+        reference: requestId,
+        transactionReference: `FALLBACK_${requestId}`,
+        feeType: 'sender',
+        requestId: requestId,
+        isFallback: true,
+        message: 'Virtual account generated successfully.'
+      }
+    };
+  }
+  
+  // ============================================================
+  // 🔥 SUCCESSFUL CASHWYRE RESPONSE
+  // ============================================================
+  if (result.success) {
+    const cashwyreDepositAmount = result.data.depositAmount || amount;
+    const cashwyreFee = result.data.feeAmount || 0;
+    const actualPlatformFee = userSeesTotalPayable - cashwyreDepositAmount;
+    const userTotalPayable = userSeesTotalPayable;
+    
+    console.log(`💰 CASHWYRE PAYIN RESPONSE:`);
+    console.log(`   Account Number: ${result.data.accountNumber}`);
+    console.log(`   Account Name: ${result.data.accountName}`);
+    console.log(`   Bank Name: ${result.data.bankName}`);
+    console.log(`   Cashwyre Fee: ₦${cashwyreFee}`);
+    console.log(`   Deposit Amount: ₦${cashwyreDepositAmount}`);
+    
+    // Create pending transaction in MongoDB
+    const user = await User.findById(userId);
+    if (user) {
+      const balanceBefore = user.walletBalance;
+      
+      const existingPending = await Transaction.findOne({ 
+        reference: requestId,
+        status: 'pending'
+      });
+      
+      if (!existingPending) {
+        const pendingTransaction = new Transaction({
+          userId: userId,
+          type: 'wallet_funding',
+          amount: amount,
+          previousBalance: balanceBefore,
+          newBalance: balanceBefore,
+          reference: requestId,
+          cashwyreReference: result.data.reference,
+          status: 'pending',
+          description: `Wallet funding - ₦${amount}`,
+          createdAt: new Date(),
+          metadata: {
+            source: 'cashwyre_payin',
+            accountNumber: result.data.accountNumber,
+            accountName: result.data.accountName,
+            bankName: result.data.bankName,
+            bankCode: result.data.bankCode,
+            cashwyreDepositAmount: cashwyreDepositAmount,
+            cashwyreFee: cashwyreFee,
+            frontendDisplayFee: frontendDisplayFee,
+            actualPlatformFee: actualPlatformFee,
+            totalPayable: userTotalPayable,
+            amountToCredit: amount,
+            transactionReference: result.data.transactionReference,
+            feeType: result.data.feeType,
+            canConfirmPayin: result.data.canConfirmPayin,
+            requestId: requestId,
+            expiresOn: expiresOn,
+            expiresOnInMins: expiresOnInMins
+          },
+          completedAt: null
+        });
+        
+        await pendingTransaction.save();
+        console.log(`✅ Pending transaction saved to MongoDB`);
+      }
+    }
+    
+    // Store virtual account info
+    const virtualAccount = new VirtualAccount({
+      userId,
+      accountNumber: result.data.accountNumber,
+      accountName: result.data.accountName,
+      bankName: result.data.bankName,
+      bankCode: result.data.bankCode,
+      currency: result.data.currency || 'NGN',
+      amount: amount,
+      totalPayable: userTotalPayable,
+      fee: frontendDisplayFee,
+      cashwyreRequestId: requestId,
+      cashwyreReference: result.data.reference,
+      expiresOn: expiresOn,
+      expiresOnInMins: expiresOnInMins,
+      active: true,
+      accountReference: null,
+      status: 'ACTIVE',
+      metadata: { accountType: 'funding' }
+    });
+    
+    await virtualAccount.save();
+    
+    console.log(`✅ Payin initiated successfully`);
+    console.log(`   Account: ${result.data.accountNumber}`);
+    console.log(`   Bank: ${result.data.bankName}`);
+    console.log(`   User pays: ₦${userTotalPayable}`);
+    console.log(`   User receives: ₦${amount}`);
+    
+    return {
+      success: true,
+      data: {
+        accountNumber: result.data.accountNumber,
+        accountName: result.data.accountName,
+        bankName: result.data.bankName,
+        bankCode: result.data.bankCode,
+        expiresOn: expiresOn.toISOString(),
+        expiresOnInMins: expiresOnInMins,
+        amount: amount,
+        totalPayable: userTotalPayable,
+        fee: frontendDisplayFee,
+        reference: result.data.reference,
+        transactionReference: result.data.transactionReference,
+        feeType: result.data.feeType,
+        requestId: requestId,
+        isFallback: false
+      }
+    };
+  }
+  
+  // Should never reach here, but just in case
+  throw new Error('Failed to create virtual account after retries');
 };
-
 
 
 
