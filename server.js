@@ -9,6 +9,7 @@ const axios = require('axios');
 require('dotenv').config();
 
 const app = express();
+const isFinite = Number.isFinite;
 
 
 
@@ -268,10 +269,35 @@ const cashwyreApiCall = async (endpoint, data) => {
 
 // Create Dynamic Virtual Account
 // ==================== CREATE DYNAMIC ACCOUNT WITH RETRY & FALLBACK ====================
-// ==================== CREATE DYNAMIC ACCOUNT - FIXED ====================
+// server.js - Complete createDynamicAccount with FULL DEBUG LOGGING
+
+// server.js - FIXED createDynamicAccount
+
+const isFinite = Number.isFinite; // ✅ ADD THIS AT TOP
+
 const createDynamicAccount = async (userId, amount) => {
-  // ✅ GENERATE A TRULY UNIQUE requestId EVERY TIME
+  console.log('\n' + '='.repeat(80));
+  console.log('💰💰💰 INITIATE PAYIN - DEBUG START 💰💰💰');
+  console.log('Time:', new Date().toISOString());
+  console.log('='.repeat(80));
+  
+  // ✅ LOG 1: Input parameters
+  console.log('\n📥 INPUT PARAMETERS:');
+  console.log(`   userId: ${userId}`);
+  console.log(`   amount: ${amount}`);
+  console.log(`   amount type: ${typeof amount}`);
+  console.log(`   amount is NaN: ${isNaN(amount)}`);
+  console.log(`   amount is finite: ${isFinite(amount)}`);
+  
+  // Validate amount
+  if (!amount || isNaN(amount) || amount <= 0) {
+    console.log('❌ Invalid amount detected!');
+    throw new Error('Invalid amount. Please enter a valid amount greater than 0.');
+  }
+  
+  // ✅ GENERATE A TRULY UNIQUE requestId
   const requestId = `${Date.now()}${crypto.randomBytes(8).toString('hex')}`;
+  console.log(`\n🔑 Generated Request ID: ${requestId}`);
   
   // Calculate 1.5% fee
   let frontendDisplayFee = 0;
@@ -291,9 +317,17 @@ const createDynamicAccount = async (userId, amount) => {
   expiresOn.setHours(expiresOn.getHours() + 1);
   const expiresOnInMins = 60;
   
+  // ✅ LOG 2: Fee calculation
+  console.log('\n💰 FEE CALCULATION:');
+  console.log(`   Amount: ₦${amount}`);
+  console.log(`   Fee (1.5%): ₦${frontendDisplayFee}`);
+  console.log(`   Total Payable: ₦${userSeesTotalPayable}`);
+  console.log(`   Expires: ${expiresOn.toISOString()}`);
+  console.log(`   Expires In Minutes: ${expiresOnInMins}`);
+  
   // ✅ CORRECT PAYLOAD for /payin/initiatePayin
   const payload = {
-    appId: CASHWYRE_CONFIG.appId,
+    appId: CASHWYRE_CONFIG.businessCode,
     requestId: requestId,
     amount: amount,
     currency: CASHWYRE_CONFIG.currency,
@@ -302,9 +336,13 @@ const createDynamicAccount = async (userId, amount) => {
     feeType: "sender"
   };
   
-  console.log(`💰 Calling Cashwyre /payin/initiatePayin for amount: ₦${amount}`);
-  console.log(`   Request ID: ${requestId}`);
-  console.log(`   feeType: sender (customer pays fee)`);
+  // ✅ LOG 3: FULL PAYLOAD BEING SENT
+  console.log('\n📤 CASHWYRE REQUEST PAYLOAD:');
+  console.log(JSON.stringify(payload, null, 2));
+  console.log(`\n🔑 Using Secret Key: ${CASHWYRE_CONFIG.secretKey.substring(0, 15)}...`);
+  console.log(`🏢 Business Code: ${CASHWYRE_CONFIG.businessCode}`);
+  console.log(`🌐 URL: ${CASHWYRE_CONFIG.baseURL}/payin/initiatePayin`);
+  console.log(`📅 Request Time: ${new Date().toISOString()}`);
   
   // ============================================================
   // 🔥 RETRY LOGIC WITH UNIQUE requestId EACH TIME
@@ -322,13 +360,29 @@ const createDynamicAccount = async (userId, amount) => {
       const attemptRequestId = `${Date.now()}${crypto.randomBytes(8).toString('hex')}`;
       payload.requestId = attemptRequestId;
       
-      console.log(`   📡 Attempt ${attempts}/${maxAttempts} (Request ID: ${attemptRequestId.substring(0, 16)}...)`);
+      console.log(`\n📡 ATTEMPT ${attempts}/${maxAttempts}:`);
+      console.log(`   Request ID: ${attemptRequestId}`);
+      console.log(`   Timestamp: ${new Date().toISOString()}`);
       
+      const startTime = Date.now();
+      
+      // ✅ Use the cashwyreApiCall helper
       result = await cashwyreApiCall('/payin/initiatePayin', payload);
       
+      const responseTime = Date.now() - startTime;
+      
+      // ✅ LOG 4: CASHWYRE RESPONSE
+      console.log(`\n📥 CASHWYRE RESPONSE (${responseTime}ms):`);
+      console.log(`   Success: ${result.success}`);
+      
+      // Log the full response
+      console.log(`   Full Response Data:`);
+      console.log(JSON.stringify(result, null, 2));
+      
       // If successful, break out of the loop
-      if (result.success) {
-        console.log(`✅ Cashwyre API call successful on attempt ${attempts}`);
+      if (result.success === true) {
+        console.log(`\n✅✅✅ SUCCESS on attempt ${attempts}!`);
+        console.log('='.repeat(80));
         break;
       }
       
@@ -345,6 +399,11 @@ const createDynamicAccount = async (userId, amount) => {
       // ✅ If duplicate request, just retry with new ID
       const isDuplicate = errorMsg.includes('duplicate');
       
+      console.log(`\n⚠️ Attempt ${attempts} result:`);
+      console.log(`   Message: ${result.message}`);
+      console.log(`   Retryable: ${isRetryable}`);
+      console.log(`   Duplicate: ${isDuplicate}`);
+      
       if ((isRetryable || isDuplicate) && attempts < maxAttempts) {
         const delay = attempts * 2000; // 2s, 4s, 6s
         console.log(`⏳ ${isDuplicate ? 'Duplicate request' : 'Retryable error'}: "${result.message}". Waiting ${delay}ms...`);
@@ -353,12 +412,23 @@ const createDynamicAccount = async (userId, amount) => {
       }
       
       // If it's a different error, or we've exhausted retries, break
-      console.log(`⚠️ Non-retryable error: ${result.message}`);
+      console.log(`⚠️ Non-retryable error or max attempts reached, stopping retries`);
       break;
       
     } catch (error) {
       lastError = error;
-      console.log(`⚠️ Attempt ${attempts} error: ${error.message}`);
+      console.log(`\n💥 ATTEMPT ${attempts} ERROR:`);
+      console.log(`   Message: ${error.message}`);
+      console.log(`   Code: ${error.code || 'N/A'}`);
+      
+      if (error.response) {
+        console.log(`   Response Status: ${error.response.status}`);
+        console.log(`   Response Data: ${JSON.stringify(error.response.data, null, 2)}`);
+      } else if (error.request) {
+        console.log(`   Request was made but no response received`);
+      } else {
+        console.log(`   Stack: ${error.stack}`);
+      }
       
       if (attempts < maxAttempts) {
         const delay = attempts * 2000;
@@ -369,80 +439,110 @@ const createDynamicAccount = async (userId, amount) => {
   }
   
   // ============================================================
-  // 🔥 IF CASHWYRE FAILS - TELL USER TO USE DEDICATED ACCOUNT
+  // 🔥 FINAL RESULT LOGGING
   // ============================================================
-  if (!result || !result.success) {
+  console.log('\n' + '='.repeat(80));
+  console.log('🎯 FINAL RESULT:');
+  
+  if (!result || result.success !== true) {
     const errorMsg = result ? result.message : (lastError ? lastError.message : 'Unknown error');
-    console.log(`❌ All ${maxAttempts} attempts failed. Error: ${errorMsg}`);
-    console.log(`💡 User should complete KYC for dedicated account or use manual funding.`);
+    console.log(`❌ FAILED after ${attempts} attempts:`);
+    console.log(`   Error: ${errorMsg}`);
+    console.log('💡 User should complete KYC for dedicated account or use manual funding.');
+    console.log('='.repeat(80) + '\n');
     
-    // ✅ THROW CLEAR ERROR - NO FALLBACK ACCOUNT
     throw new Error(`Virtual account service is currently unavailable. Please complete KYC for a dedicated account or use manual funding. Error: ${errorMsg}`);
   }
   
   // ============================================================
   // 🔥 SUCCESSFUL CASHWYRE RESPONSE
   // ============================================================
-  if (result.success) {
-    const accountData = result.data;
-    
-    console.log(`💰 CASHWYRE /payin/initiatePayin RESPONSE:`);
-    console.log(`   Account Number: ${accountData.accountNumber}`);
-    console.log(`   Account Name: ${accountData.accountName}`);
-    console.log(`   Bank Name: ${accountData.bankName}`);
-    console.log(`   Deposit Amount: ₦${accountData.depositAmount}`);
-    console.log(`   Fee Amount: ₦${accountData.feeAmount}`);
-    console.log(`   Transaction Reference: ${accountData.transactionReference}`);
-    
-    // Create pending transaction in MongoDB
+  const accountData = result.data;
+  
+  console.log('\n💰💰💰 CASHWYRE SUCCESS RESPONSE DETAILS:');
+  console.log(`   Account Number: ${accountData.accountNumber}`);
+  console.log(`   Account Name: ${accountData.accountName}`);
+  console.log(`   Bank Name: ${accountData.bankName}`);
+  console.log(`   Bank Code: ${accountData.bankCode}`);
+  console.log(`   Deposit Amount: ₦${accountData.depositAmount}`);
+  console.log(`   Fee Amount: ₦${accountData.feeAmount}`);
+  console.log(`   Currency: ${accountData.currency}`);
+  console.log(`   Transaction Reference: ${accountData.transactionReference}`);
+  console.log(`   Reference: ${accountData.reference}`);
+  console.log(`   Can Confirm Payin: ${accountData.canConfirmPayin}`);
+  console.log(`   Status: ${accountData.status}`);
+  
+  console.log('\n📦 FULL accountData:');
+  console.log(JSON.stringify(accountData, null, 2));
+  console.log('\n' + '='.repeat(80));
+  console.log('✅ PAYIN INITIATED SUCCESSFULLY');
+  console.log('='.repeat(80) + '\n');
+  
+  // ============================================================
+  // 🔥 SAVE TO MONGODB
+  // ============================================================
+  console.log('\n💾 SAVING TO MONGODB...');
+  
+  try {
+    // 1. Find user
     const user = await User.findById(userId);
-    if (user) {
-      const balanceBefore = user.walletBalance;
-      
-      const existingPending = await Transaction.findOne({ 
+    if (!user) {
+      console.log('❌ User not found in database!');
+      throw new Error('User not found');
+    }
+    console.log(`✅ User found: ${user.fullName} (${user.email})`);
+    console.log(`   Current balance: ₦${user.walletBalance}`);
+    
+    // 2. Create pending transaction
+    const balanceBefore = user.walletBalance;
+    console.log(`   Balance before: ₦${balanceBefore}`);
+    
+    const existingPending = await Transaction.findOne({ 
+      reference: requestId,
+      status: 'pending'
+    });
+    
+    if (!existingPending) {
+      const pendingTransaction = new Transaction({
+        userId: userId,
+        type: 'wallet_funding',
+        amount: amount,
+        previousBalance: balanceBefore,
+        newBalance: balanceBefore,
         reference: requestId,
-        status: 'pending'
+        cashwyreReference: accountData.reference || accountData.transactionReference,
+        status: 'pending',
+        description: `Virtual Account Funding - ₦${amount}`,
+        createdAt: new Date(),
+        metadata: {
+          source: 'cashwyre_payin',
+          accountNumber: accountData.accountNumber,
+          accountName: accountData.accountName,
+          bankName: accountData.bankName,
+          bankCode: accountData.bankCode,
+          depositAmount: accountData.depositAmount,
+          feeAmount: accountData.feeAmount,
+          frontendDisplayFee: frontendDisplayFee,
+          totalPayable: accountData.depositAmount ?? userSeesTotalPayable, // ✅ Fixed
+          amountToCredit: amount,
+          transactionReference: accountData.transactionReference,
+          feeType: accountData.feeType,
+          canConfirmPayin: accountData.canConfirmPayin,
+          requestId: requestId,
+          expiresOn: expiresOn,
+          expiresOnInMins: expiresOnInMins,
+          cashwyreResponse: accountData
+        },
+        completedAt: null
       });
       
-      if (!existingPending) {
-        const pendingTransaction = new Transaction({
-          userId: userId,
-          type: 'wallet_funding',
-          amount: amount,
-          previousBalance: balanceBefore,
-          newBalance: balanceBefore,
-          reference: requestId,
-          cashwyreReference: accountData.reference || accountData.transactionReference,
-          status: 'pending',
-          description: `Virtual Account Funding - ₦${amount}`,
-          createdAt: new Date(),
-          metadata: {
-            source: 'cashwyre_payin',
-            accountNumber: accountData.accountNumber,
-            accountName: accountData.accountName,
-            bankName: accountData.bankName,
-            bankCode: accountData.bankCode,
-            depositAmount: accountData.depositAmount,
-            feeAmount: accountData.feeAmount,
-            frontendDisplayFee: frontendDisplayFee,
-            totalPayable: accountData.depositAmount || userSeesTotalPayable,
-            amountToCredit: amount,
-            transactionReference: accountData.transactionReference,
-            feeType: accountData.feeType,
-            canConfirmPayin: accountData.canConfirmPayin,
-            requestId: requestId,
-            expiresOn: expiresOn,
-            expiresOnInMins: expiresOnInMins
-          },
-          completedAt: null
-        });
-        
-        await pendingTransaction.save();
-        console.log(`✅ Pending transaction saved to MongoDB`);
-      }
+      await pendingTransaction.save();
+      console.log(`✅ Pending transaction saved with ID: ${pendingTransaction._id}`);
+    } else {
+      console.log(`⚠️ Pending transaction already exists: ${existingPending._id}`);
     }
     
-    // Store virtual account info
+    // 3. Store virtual account info
     const virtualAccount = new VirtualAccount({
       userId,
       accountNumber: accountData.accountNumber,
@@ -451,8 +551,8 @@ const createDynamicAccount = async (userId, amount) => {
       bankCode: accountData.bankCode || '50515',
       currency: accountData.currency || 'NGN',
       amount: amount,
-      totalPayable: accountData.depositAmount || userSeesTotalPayable,
-      fee: accountData.feeAmount || frontendDisplayFee,
+      totalPayable: accountData.depositAmount ?? userSeesTotalPayable, // ✅ Fixed
+      fee: accountData.feeAmount ?? frontendDisplayFee, // ✅ Fixed
       cashwyreRequestId: requestId,
       cashwyreReference: accountData.reference || accountData.transactionReference,
       expiresOn: expiresOn,
@@ -463,44 +563,55 @@ const createDynamicAccount = async (userId, amount) => {
       metadata: { 
         accountType: 'funding',
         source: 'payin',
-        canConfirmPayin: accountData.canConfirmPayin
+        canConfirmPayin: accountData.canConfirmPayin,
+        cashwyreFullResponse: accountData
       }
     });
     
     await virtualAccount.save();
-    
-    console.log(`✅ Payin initiated successfully`);
+    console.log(`✅ Virtual account saved with ID: ${virtualAccount._id}`);
     console.log(`   Account: ${accountData.accountNumber}`);
     console.log(`   Bank: ${accountData.bankName}`);
-    console.log(`   User receives: ₦${amount}`);
-    console.log(`   Total payable: ₦${accountData.depositAmount || userSeesTotalPayable}`);
     
-    return {
-      success: true,
-      data: {
-        accountNumber: accountData.accountNumber,
-        accountName: accountData.accountName || 'DalabaPay User',
-        bankName: accountData.bankName || 'Moniepoint Microfinance Bank',
-        bankCode: accountData.bankCode || '50515',
-        expiresOn: expiresOn.toISOString(),
-        expiresOnInMins: expiresOnInMins,
-        amount: amount,
-        totalPayable: accountData.depositAmount || userSeesTotalPayable,
-        fee: accountData.feeAmount || frontendDisplayFee,
-        reference: accountData.reference || accountData.transactionReference,
-        transactionReference: accountData.transactionReference,
-        feeType: accountData.feeType,
-        requestId: requestId,
-        canConfirmPayin: accountData.canConfirmPayin || false,
-        isFallback: false
-      }
-    };
+  } catch (saveError) {
+    console.error('❌ MongoDB Save Error:', saveError.message);
+    console.error('Stack:', saveError.stack);
+    // ✅ Rethrow so the client knows something went wrong
+    throw new Error(`Failed to save virtual account: ${saveError.message}`);
   }
   
-  // Should never reach here, but just in case
-  throw new Error('Failed to create virtual account');
+  // ============================================================
+  // 🔥 RETURN SUCCESS RESPONSE
+  // ============================================================
+  console.log(`\n✅ Payin initiated successfully`);
+  console.log(`   Account: ${accountData.accountNumber}`);
+  console.log(`   Bank: ${accountData.bankName}`);
+  console.log(`   User receives: ₦${amount}`);
+  console.log(`   Total payable: ₦${accountData.depositAmount ?? userSeesTotalPayable}`);
+  console.log('='.repeat(80) + '\n');
+  
+  return {
+    success: true,
+    data: {
+      accountNumber: accountData.accountNumber,
+      accountName: accountData.accountName || 'DalabaPay User',
+      bankName: accountData.bankName || 'Moniepoint Microfinance Bank',
+      bankCode: accountData.bankCode || '50515',
+      expiresOn: expiresOn.toISOString(),
+      expiresOnInMins: expiresOnInMins,
+      amount: amount,
+      totalPayable: accountData.depositAmount ?? userSeesTotalPayable,
+      fee: accountData.feeAmount ?? frontendDisplayFee,
+      reference: accountData.reference || accountData.transactionReference,
+      transactionReference: accountData.transactionReference,
+      feeType: accountData.feeType,
+      requestId: requestId,
+      canConfirmPayin: accountData.canConfirmPayin || false,
+      isFallback: false,
+      status: accountData.status || 'ACTIVE'
+    }
+  };
 };
-
 
 
 
