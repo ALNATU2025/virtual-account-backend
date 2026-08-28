@@ -273,7 +273,6 @@ const cashwyreApiCall = async (endpoint, data) => {
 
 // server.js - FIXED createDynamicAccount
 
-const isFinite = Number.isFinite; // ✅ ADD THIS AT TOP
 
 const createDynamicAccount = async (userId, amount) => {
   console.log('\n' + '='.repeat(80));
