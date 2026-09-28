@@ -70,6 +70,67 @@ const CASHWYRE_CONFIG = {
   country: 'NG'
 };
 
+
+
+// ==================== MAIN BACKEND NOTIFIER ====================
+// After we credit a user's wallet here, we tell the main backend to fire
+// the FCM push + save the in-app notification.
+// ======================================================================
+const MAIN_BACKEND_URL = process.env.MAIN_BACKEND_URL || 'https://vtpass-backend.onrender.com';
+const INTERNAL_NOTIFY_SECRET = process.env.INTERNAL_NOTIFY_SECRET || 'dalabapay_internal_2026_secret';
+
+async function notifyMainBackendWalletCredit({
+  userId,
+  amount,
+  newBalance,
+  source = 'virtual_account',
+  reference = '',
+  bankName = '',
+  accountNumber = '',
+}) {
+  try {
+    if (!userId) {
+      console.log('⚠️ [MAIN-NOTIFY] No userId provided — skipping');
+      return { success: false, reason: 'no_userId' };
+    }
+
+    const url = `${MAIN_BACKEND_URL}/api/internal/notify-wallet-credit`;
+    console.log(`📣 [MAIN-NOTIFY] POST ${url} for user ${userId}, amount ₦${amount}`);
+
+    const response = await axios.post(
+      url,
+      {
+        userId: userId.toString(),
+        amount: Number(amount),
+        newBalance: Number(newBalance),
+        source,
+        reference,
+        bankName,
+        accountNumber,
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'x-internal-secret': INTERNAL_NOTIFY_SECRET,
+        },
+        timeout: 15000,
+      }
+    );
+
+    console.log(`✅ [MAIN-NOTIFY] Response:`, JSON.stringify(response.data));
+    return response.data;
+  } catch (error) {
+    console.error(
+      '❌ [MAIN-NOTIFY] Failed:',
+      error.response?.data || error.message
+    );
+    // Never throw — notification failure must not break the credit flow
+    return { success: false, error: error.message };
+  }
+}
+// ==================== END MAIN BACKEND NOTIFIER ====================
+
+
 // ==================== RAW BODY MIDDLEWARE ====================
 app.use(express.json({
   limit: '10mb',
@@ -1358,6 +1419,19 @@ app.post('/api/webhooks/cashwyre-fiat', async (req, res) => {
       
       console.log(`✅ Successfully processed deposit: ₦${amount} for user ${virtualAccount.userId}`);
       console.log(`💰 New balance: ₦${result.newBalance}`);
+
+
+            // ✅ Notify user via FCM push + in-app notification
+      notifyMainBackendWalletCredit({
+        userId: virtualAccount.userId,
+        amount: amount,
+        newBalance: result.newBalance,
+        source: 'virtual_account',
+        reference: reference,
+        bankName: BankName || '',
+        accountNumber: AccountNumber || '',
+      }).catch(err => console.error('⚠️ [MAIN-NOTIFY] error:', err.message));
+
       
       // 🔥 CRITICAL: Update the pending transaction status in database
       await Transaction.findOneAndUpdate(
@@ -2260,6 +2334,18 @@ app.post('/api/payments/manual-recovery', async (req, res) => {
         console.log(`   User: ${user.email}`);
         console.log(`   Balance: ₦${oldBalance} → ₦${newBalance}`);
         console.log(`   Credited: ₦${creditAmount}`);
+
+              // ✅ Notify user via FCM push + in-app notification
+        notifyMainBackendWalletCredit({
+          userId: user._id,
+          amount: creditAmount,
+          newBalance: newBalance,
+          source: 'virtual_account',
+          reference: cashwyreCode || `MANUAL_${Date.now()}`,
+          bankName: '',
+          accountNumber: accountNumber || '',
+        }).catch(err => console.error('⚠️ [MAIN-NOTIFY] error:', err.message));
+
         
         res.json({
             success: true,
@@ -2385,6 +2471,19 @@ app.post('/api/webhooks/cashwyre-sync', async (req, res) => {
       console.log(`✅ UPDATED pending transaction to completed: ${transaction._id}`);
       console.log(`💰 User wallet credited: ₦${creditAmount}`);
       console.log(`💰 New balance: ₦${newBalance}`);
+
+
+            // ✅ Notify user via FCM push + in-app notification
+      notifyMainBackendWalletCredit({
+        userId: user._id,
+        amount: creditAmount,
+        newBalance: newBalance,
+        source: 'virtual_account',
+        reference: cashwyreCode || reference,
+        bankName: bankName || '',
+        accountNumber: accountNumber || '',
+      }).catch(err => console.error('⚠️ [MAIN-NOTIFY] error:', err.message));
+
       
     } else {
       console.log('⚠️ No pending transaction found, creating new completed transaction');
@@ -2428,6 +2527,18 @@ app.post('/api/webhooks/cashwyre-sync', async (req, res) => {
       console.log(`✅ Created new completed transaction: ${transaction._id}`);
       console.log(`💰 User wallet credited: ₦${creditAmount}`);
       console.log(`💰 New balance: ₦${newBalance}`);
+
+            // ✅ Notify user via FCM push + in-app notification
+      notifyMainBackendWalletCredit({
+        userId: user._id,
+        amount: creditAmount,
+        newBalance: newBalance,
+        source: 'virtual_account',
+        reference: cashwyreCode || reference,
+        bankName: bankName || '',
+        accountNumber: accountNumber || '',
+      }).catch(err => console.error('⚠️ [MAIN-NOTIFY] error:', err.message));
+
     }
     
     const duration = Date.now() - startTime;
@@ -2750,6 +2861,19 @@ app.post('/api/webhooks/cashwyre-process', async (req, res) => {
         console.log(`✅✅✅ SUCCESS: User ${user.email} credited ₦${creditAmount}`);
         console.log(`   💰 Balance: ₦${oldBalance} → ₦${newBalance}`);
         console.log(`   💰 Fee Removed: ₦${feeDeducted || (amountPaid - creditAmount)}`);
+
+
+              // ✅ Notify user via FCM push + in-app notification
+        notifyMainBackendWalletCredit({
+          userId: user._id,
+          amount: creditAmount,
+          newBalance: newBalance,
+          source: 'virtual_account',
+          reference: cashwyreCode || '',
+          bankName: bankName || '',
+          accountNumber: accountNumber || '',
+        }).catch(err => console.error('⚠️ [MAIN-NOTIFY] error:', err.message));
+
         
     } catch (error) {
         console.error('❌ Webhook error:', error.message);
